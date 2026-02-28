@@ -2,7 +2,7 @@
 
 A **self-contained, Terraform-deployed** Azure API Management (APIM) gateway for multi-tenant Azure OpenAI workloads. Designed to demonstrate how APIM can manage, meter, and protect access to large language models — with per-tenant token rate limiting, cost estimation dashboards, content safety, and multi-region load balancing — all from a single `terraform apply`.
 
-> **"Lite" means standalone.** This deployment creates its own VNet and resources in a single resource group. There are no private endpoints, no hub-spoke networking, and no shared DNS zones. It is purpose-built to showcase APIM + AI capabilities without infrastructure dependencies. For production deployments with enterprise networking (private endpoints, DNS, firewalls), engage your infrastructure team and see the [AI Gateway Landing Zone](https://github.com/Azure-Samples/AI-Gateway) for reference architectures.
+> **"Lite" means standalone.** This deployment creates its own VNet and resources in a single resource group. There are no private endpoints, no hub-spoke networking, and no shared DNS zones. It is purpose-built to showcase APIM + AI capabilities without infrastructure dependencies. For production deployments with enterprise networking (private endpoints, DNS, firewalls), engage your infrastructure team and see the [AI Landing Zone](https://github.com/Azure/AI-Landing-Zones) for reference architectures.
 
 ---
 
