@@ -47,6 +47,38 @@ A single `terraform apply` creates the following in one resource group:
 
 ---
 
+## Connectivity & Security Model
+
+```
+  Internet                VNet (10.0.254.0/24)
+     │                    ┌──────────────────────────────────────────┐
+     │   HTTPS + api-key  │  APIM Subnet (/27)                      │
+     ├───────────────────►│  ┌─────────────────┐                     │
+     │                    │  │  APIM Gateway    │──── Managed Identity ──► AI Services (network ACL: allow APIM subnet)
+     │                    │  │  (public IP)     │──── Managed Identity ──► Content Safety (network ACL: allow APIM subnet)
+     │                    │  └─────────────────┘                     │
+     │                    │                                          │
+     │                    │  Private Endpoints Subnet (/25)          │
+     │                    │  (reserved for production use)           │
+     │                    └──────────────────────────────────────────┘
+```
+
+| Layer | Lite (this repo) | Production |
+|---|---|---|
+| **APIM frontend** | Public endpoint, authenticated via APIM subscription key (`api-key` header) | Same, or add OAuth 2.0 / JWT validation |
+| **APIM → AI Services** | System-assigned managed identity (`Cognitive Services OpenAI User` role) — no API keys | Same (or user-assigned MI) |
+| **APIM → Content Safety** | System-assigned managed identity (`Cognitive Services User` role) | Same |
+| **AI Services network** | VNet service endpoint — network ACL allows APIM subnet only; public access disabled (`default_action = "Deny"`) | Private endpoint + private DNS zone |
+| **Content Safety network** | VNet service endpoint — network ACL allows APIM subnet only; public access disabled | Private endpoint + private DNS zone |
+| **Private endpoints** | Subnet reserved but not used | Required for full network isolation |
+
+**Key points:**
+- Tenants authenticate to APIM with their subscription key. APIM never exposes backend AI Services keys — it uses its managed identity to call downstream services.
+- AI Services and Content Safety resources deny all traffic except from the APIM subnet via `network_acls { default_action = "Deny" }` with a VNet service endpoint rule.
+- For production, replace service endpoints with **private endpoints** and configure private DNS zones so that traffic never leaves the Microsoft backbone. See the [Production Considerations](#production-considerations) table below.
+
+---
+
 ## Key Features
 
 ### 1. Multi-Tenant Token Rate Limiting
@@ -388,8 +420,9 @@ This "Lite" deployment is designed for **capability demonstration and proof-of-c
 
 For production-grade infrastructure with enterprise networking, see:
 
-- [AI Gateway Landing Zone](https://github.com/Azure-Samples/AI-Gateway) — full reference architecture
-- [Azure API Management Landing Zone Accelerator](https://github.com/Azure/apim-landing-zone-accelerator)
+- [AI Landing Zone](https://github.com/Azure/AI-Landing-Zones) — full reference architecture
+- [Azure API Management Landing Zone Accelerator](https://github.com/Azure/apim-landing-zone-accelerator) - APIM Landing zone
+- [AI Gateway Labs](https://github.com/Azure-Samples/AI-Gateway/tree/main/labs) - AI Gateway Labs
 
 ---
 
