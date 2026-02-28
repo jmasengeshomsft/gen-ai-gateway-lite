@@ -1,4 +1,10 @@
 locals {
+  # Common tags applied to all resources
+  common_tags = {
+    Project   = "Gen AI Gateway Lite"
+    ManagedBy = "Terraform"
+  }
+
   service_deployments = {
     for combo in flatten([
       for svc_key, svc in var.openai_config : [
@@ -37,24 +43,34 @@ locals {
     ["    \"${azurerm_api_management_subscription.apim-api-subscription-openai.subscription_id}\", \"Default (Lab)\""]
   ))
   subscription_names_datatable = "let subscriptionNames = datatable(SubscriptionId: string, SubscriptionName: string)[\r\n${local.subscription_names_rows}\r\n];\r\n"
+
+  # Build per-tenant subscription objects for the policy template
+  tenant_subscriptions = [
+    for k, v in var.apim_tenants : {
+      subscription_id    = azurerm_api_management_subscription.tenant[k].subscription_id
+      display_name       = v.display_name
+      tokens_per_minute  = coalesce(v.tokens_per_minute, var.default_tokens_per_minute)
+      token_quota        = coalesce(v.token_quota, var.default_token_quota)
+      token_quota_period = coalesce(v.token_quota_period, var.default_token_quota_period)
+    }
+  ]
 }
 
 
 resource "azurerm_resource_group" "rg" {
-  name     = var.resource_group_name
+  name     = "${var.resource_group_name}-${var.app_suffix}-rg"
   location = var.resource_group_location
+  tags     = local.common_tags
 }
 
 
-// create a virtual network with 10.0.254.0/24. It should have two subnets:
-// 1. subnet1 with address space /27 called apim
-// 2. subnet2 with address space /25 called private-endpoints
-
+# Virtual Network with two subnets: apim (/27) + private-endpoints (/25)
 resource "azurerm_virtual_network" "vnet" {
   name                = "${var.vnet_name}-${var.app_suffix}"
   address_space       = [var.vnet_address_space]
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
+  tags                = local.common_tags
 }
 
 resource "azurerm_subnet" "subnet_apim" {
@@ -80,6 +96,7 @@ resource "azurerm_network_security_group" "apim_nsg" {
   name                = "apim-nsg-${var.app_suffix}"
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
+  tags                = local.common_tags
 }
 
 resource "azurerm_subnet_network_security_group_association" "apim_nsg_assoc" {
@@ -95,15 +112,16 @@ resource "azurerm_subnet" "subnet_private_endpoints" {
 }
 
 
-resource "azurerm_ai_services" "ai-services" {
+resource "azurerm_cognitive_account" "ai-services" {
   for_each = var.openai_config
 
   name                               = "${each.value.name}-${var.app_suffix}"
   location                           = each.value.location
   resource_group_name                = azurerm_resource_group.rg.name
+  kind                               = "AIServices"
   sku_name                           = var.openai_sku
-  local_authentication_enabled       = true
-  public_network_access              = "Enabled"
+  local_auth_enabled                 = true
+  public_network_access_enabled      = true
   outbound_network_access_restricted = true
   custom_subdomain_name              = "${each.value.name}-${var.app_suffix}"
 
@@ -114,6 +132,8 @@ resource "azurerm_ai_services" "ai-services" {
     }
   }
 
+  tags = local.common_tags
+
   lifecycle {
     ignore_changes = [custom_subdomain_name]
   }
@@ -122,7 +142,7 @@ resource "azurerm_ai_services" "ai-services" {
 resource "azurerm_monitor_diagnostic_setting" "ai_services_diag" {
   for_each            = var.openai_config
   name                = "${each.value.name}-diag-${var.app_suffix}"
-  target_resource_id  = azurerm_ai_services.ai-services[each.key].id
+  target_resource_id  = azurerm_cognitive_account.ai-services[each.key].id
   log_analytics_workspace_id = azurerm_log_analytics_workspace.apim_log_analytics.id
 
   enabled_log {
@@ -169,7 +189,7 @@ resource "azurerm_monitor_diagnostic_setting" "apim_diagnostics" {
 resource "azapi_resource" "ai_content_filter" {
   for_each  = var.openai_config
   type      = "Microsoft.CognitiveServices/accounts/raiPolicies@2024-10-01"
-  parent_id = azurerm_ai_services.ai-services[each.key].id
+  parent_id = azurerm_cognitive_account.ai-services[each.key].id
   name      = lower(replace("content-filter-${each.value.name}-${var.app_suffix}", "-", ""))
 
   body = {
@@ -205,7 +225,7 @@ resource "azurerm_cognitive_deployment" "deploy" {
   for_each = local.service_deployments
 
   name                 = each.value.dep.deployment_name
-  cognitive_account_id = azurerm_ai_services.ai-services[each.value.svc_key].id
+  cognitive_account_id = azurerm_cognitive_account.ai-services[each.value.svc_key].id
 
   sku {
     name     = "GlobalStandard"
@@ -228,8 +248,9 @@ resource "azapi_resource" "apim" {
   type                      = "Microsoft.ApiManagement/service@2024-06-01-preview"
   name                      = "${var.apim_resource_name}-${var.app_suffix}"
   parent_id                 = azurerm_resource_group.rg.id
-  location                  = var.apim_resource_location # SKU BasicV2 is not yet supported in the region Sweden Central
+  location                  = var.apim_resource_location # StandardV2 SKU not available in all regions
   schema_validation_enabled = true
+  tags                      = local.common_tags
 
   identity {
     type = "SystemAssigned"
@@ -241,8 +262,8 @@ resource "azapi_resource" "apim" {
       capacity = var.apim_sku_capacity
     }
     properties = {
-      publisherEmail      = "jmasengesho@microsoft.com"
-      publisherName       = "Microsoft"
+      publisherEmail      = "admin@contoso.com"     # TODO: update for your org
+      publisherName       = "Contoso"                # TODO: update for your org
       virtualNetworkType  = "External"
       virtualNetworkConfiguration = {
         subnetResourceId = azurerm_subnet.subnet_apim.id
@@ -258,7 +279,7 @@ resource "azapi_resource" "apim" {
 resource "azurerm_role_assignment" "Cognitive-Services-OpenAI-User" {
   for_each = var.openai_config
 
-  scope                = azurerm_ai_services.ai-services[each.key].id
+  scope                = azurerm_cognitive_account.ai-services[each.key].id
   role_definition_name = "Cognitive Services OpenAI User"
   principal_id         = azapi_resource.apim.identity.0.principal_id
 }
@@ -308,13 +329,42 @@ resource "azurerm_api_management_product_api" "openai_product_api" {
   api_name             = azurerm_api_management_api.apim-api-openai.name
 }
 
-# Product-level policy removed — rate limiting now in API-level policy.xml
-# resource "azurerm_api_management_product_policy" "openai_policy" {
-#   product_id           = azurerm_api_management_product.openai_product.product_id
-#   api_management_name  = azapi_resource.apim.name
-#   resource_group_name  = azurerm_resource_group.rg.name
-#   xml_content = replace(file("product-policy.xml"), "{tokens-per-minute}", 50000)
-# }
+### Azure Content Safety — enables llm-content-safety APIM policy
+resource "azurerm_cognitive_account" "content_safety" {
+  name                  = "contentsafety-${var.app_suffix}"
+  location              = azurerm_resource_group.rg.location
+  resource_group_name   = azurerm_resource_group.rg.name
+  sku_name              = "S0"
+  kind                  = "ContentSafety"
+  custom_subdomain_name = lower("contentsafety-${var.app_suffix}")
+  public_network_access_enabled = true
+  local_auth_enabled    = true
+
+  network_acls {
+    default_action = "Deny"
+    virtual_network_rules {
+      subnet_id = azurerm_subnet.subnet_apim.id
+    }
+  }
+
+  tags = local.common_tags
+}
+
+# Grant APIM managed identity "Cognitive Services User" on the Content Safety resource
+resource "azurerm_role_assignment" "content_safety_user" {
+  scope                = azurerm_cognitive_account.content_safety.id
+  role_definition_name = "Cognitive Services User"
+  principal_id         = azapi_resource.apim.identity.0.principal_id
+}
+
+# APIM backend for Content Safety (used by llm-content-safety policy)
+resource "azurerm_api_management_backend" "content_safety_backend" {
+  name                = "content-safety-backend"
+  resource_group_name = azurerm_resource_group.rg.name
+  api_management_name = azapi_resource.apim.name
+  protocol            = "http"
+  url                 = "${azurerm_cognitive_account.content_safety.endpoint}"
+}
 
 resource "azurerm_api_management_backend" "apim-backend-openai" {
   for_each = var.openai_config
@@ -323,7 +373,7 @@ resource "azurerm_api_management_backend" "apim-backend-openai" {
   resource_group_name = azurerm_resource_group.rg.name
   api_management_name = azapi_resource.apim.name
   protocol            = "http"
-  url                 = "${azurerm_ai_services.ai-services[each.key].endpoint}openai"
+  url                 = "${azurerm_cognitive_account.ai-services[each.key].endpoint}openai"
 }
 
 resource "azapi_update_resource" "apim-backend-circuit-breaker" {
@@ -388,7 +438,14 @@ resource "azurerm_api_management_api_policy" "apim-openai-policy-openai" {
   api_management_name = azurerm_api_management_api.apim-api-openai.api_management_name
   resource_group_name = azurerm_api_management_api.apim-api-openai.resource_group_name
 
-  xml_content = replace(file("policy.xml"), "{backend-id}", azapi_resource.apim-backend-pool-openai.name)
+  xml_content = templatefile("${path.module}/policy.xml.tftpl", {
+    backend_id                 = azapi_resource.apim-backend-pool-openai.name
+    content_safety_backend_id  = azurerm_api_management_backend.content_safety_backend.name
+    tenant_subscriptions        = local.tenant_subscriptions
+    default_tokens_per_minute   = var.default_tokens_per_minute
+    default_token_quota         = var.default_token_quota
+    default_token_quota_period  = var.default_token_quota_period
+  })
 }
 
 # ── Default (lab) APIM subscription ──────────────────────────────────────────
@@ -421,6 +478,7 @@ resource "azurerm_log_analytics_workspace" "apim_log_analytics" {
   resource_group_name = azurerm_resource_group.rg.name
   sku                 = "PerGB2018"
   retention_in_days   = 30
+  tags                = local.common_tags
 }
 
 resource "azurerm_application_insights" "apim_ai_logger" {
@@ -430,6 +488,7 @@ resource "azurerm_application_insights" "apim_ai_logger" {
   application_type    = "web"
   retention_in_days   = 30
   workspace_id        = azurerm_log_analytics_workspace.apim_log_analytics.id
+  tags                = local.common_tags
 }
 
 // 2. Create an APIM logger that points at the AppInsights instance
@@ -494,10 +553,11 @@ resource "azapi_resource" "apim_api_diagnostic" {
 }
 
 // 4. Azure Monitor logger — enables ApiManagementGatewayLlmLog resource-specific table in LAW
-resource "azapi_resource" "apim_azure_monitor_logger" {
-  type      = "Microsoft.ApiManagement/service/loggers@2024-06-01-preview"
-  parent_id = azapi_resource.apim.id
-  name      = "azuremonitor"
+// Note: APIM auto-creates an "azuremonitor" logger on service creation,
+// so we use azapi_update_resource to configure the existing resource.
+resource "azapi_update_resource" "apim_azure_monitor_logger" {
+  type        = "Microsoft.ApiManagement/service/loggers@2024-06-01-preview"
+  resource_id = "${azapi_resource.apim.id}/loggers/azuremonitor"
 
   body = {
     properties = {
@@ -517,7 +577,7 @@ resource "azapi_resource" "apim_api_diagnostic_azuremonitor" {
     properties = {
       alwaysLog   = "allErrors"
       logClientIp = true
-      loggerId    = azapi_resource.apim_azure_monitor_logger.id
+      loggerId    = azapi_update_resource.apim_azure_monitor_logger.id
       verbosity   = "verbose"
       sampling = {
         samplingType = "fixed"
@@ -548,31 +608,36 @@ resource "azapi_resource" "apim_api_diagnostic_azuremonitor" {
 
 # Old workbook resources removed — dashboard is now deployed via dashboard.tf
 
-### Alert Rules and Notifications
+### Alert Rules and Notifications (conditional on monitoring_alerting.enabled)
 # Action Group for email notifications
 resource "azurerm_monitor_action_group" "apim_alerts" {
+  count               = var.monitoring_alerting.enabled ? 1 : 0
   name                = "apim-alerts-${var.app_suffix}"
   resource_group_name = azurerm_resource_group.rg.name
   short_name          = "apimalerts"
 
-  email_receiver {
-    name          = "admin-email"
-    email_address = "jmasengesho@microsoft.com"
+  dynamic "email_receiver" {
+    for_each = var.monitoring_alerting.alert_emails
+    content {
+      name          = "alert-email-${email_receiver.key}"
+      email_address = email_receiver.value
+    }
   }
 
-  tags = {
+  tags = merge(local.common_tags, {
     Environment = "monitoring"
     Purpose     = "apim-alerting"
-  }
+  })
 }
 
 # Metric Alert Rule for APIM 4xx errors
 resource "azurerm_monitor_metric_alert" "apim_4xx_errors" {
+  count               = var.monitoring_alerting.enabled ? 1 : 0
   name                = "apim-4xx-errors-alert-${var.app_suffix}"
   resource_group_name = azurerm_resource_group.rg.name
   scopes              = [azapi_resource.apim.id]
-  description         = "Alert when APIM has more than 10 4xx errors in 5 minutes"
-  severity            = 2
+  description         = "Alert when APIM has more than ${var.monitoring_alerting.error_4xx_threshold} 4xx errors in 5 minutes"
+  severity            = var.monitoring_alerting.alert_severity
   enabled             = true
   auto_mitigate       = true
   frequency           = "PT1M"
@@ -583,7 +648,7 @@ resource "azurerm_monitor_metric_alert" "apim_4xx_errors" {
     metric_name      = "Requests"
     aggregation      = "Total"
     operator         = "GreaterThan"
-    threshold        = 10
+    threshold        = var.monitoring_alerting.error_4xx_threshold
 
     dimension {
       name     = "BackendResponseCode"
@@ -593,22 +658,23 @@ resource "azurerm_monitor_metric_alert" "apim_4xx_errors" {
   }
 
   action {
-    action_group_id = azurerm_monitor_action_group.apim_alerts.id
+    action_group_id = azurerm_monitor_action_group.apim_alerts[0].id
   }
 
-  tags = {
+  tags = merge(local.common_tags, {
     Environment = "monitoring"
     Purpose     = "apim-error-monitoring"
-  }
+  })
 }
 
 # Metric Alert Rule for APIM capacity utilization
 resource "azurerm_monitor_metric_alert" "apim_capacity" {
+  count               = var.monitoring_alerting.enabled ? 1 : 0
   name                = "apim-capacity-alert-${var.app_suffix}"
   resource_group_name = azurerm_resource_group.rg.name
   scopes              = [azapi_resource.apim.id]
-  description         = "Alert when APIM capacity utilization is greater than or equal to 70%"
-  severity            = 2
+  description         = "Alert when APIM capacity utilization >= ${var.monitoring_alerting.capacity_threshold}%"
+  severity            = var.monitoring_alerting.alert_severity
   enabled             = true
   auto_mitigate       = true
   frequency           = "PT5M"
@@ -619,26 +685,27 @@ resource "azurerm_monitor_metric_alert" "apim_capacity" {
     metric_name      = "Capacity"
     aggregation      = "Average"
     operator         = "GreaterThanOrEqual"
-    threshold        = 70
+    threshold        = var.monitoring_alerting.capacity_threshold
   }
 
   action {
-    action_group_id = azurerm_monitor_action_group.apim_alerts.id
+    action_group_id = azurerm_monitor_action_group.apim_alerts[0].id
   }
 
-  tags = {
+  tags = merge(local.common_tags, {
     Environment = "monitoring"
     Purpose     = "apim-capacity-monitoring"
-  }
+  })
 }
 
 # Metric Alert Rule for APIM latency
 resource "azurerm_monitor_metric_alert" "apim_latency" {
+  count               = var.monitoring_alerting.enabled ? 1 : 0
   name                = "apim-latency-alert-${var.app_suffix}"
   resource_group_name = azurerm_resource_group.rg.name
   scopes              = [azapi_resource.apim.id]
-  description         = "Alert when APIM response time is greater than 4 seconds"
-  severity            = 2
+  description         = "Alert when APIM avg response time > ${var.monitoring_alerting.latency_threshold_ms}ms"
+  severity            = var.monitoring_alerting.alert_severity
   enabled             = true
   auto_mitigate       = true
   frequency           = "PT1M"
@@ -649,23 +716,22 @@ resource "azurerm_monitor_metric_alert" "apim_latency" {
     metric_name      = "Duration"
     aggregation      = "Average"
     operator         = "GreaterThan"
-    threshold        = 4000  # 4 seconds in milliseconds
+    threshold        = var.monitoring_alerting.latency_threshold_ms
   }
 
   action {
-    action_group_id = azurerm_monitor_action_group.apim_alerts.id
+    action_group_id = azurerm_monitor_action_group.apim_alerts[0].id
   }
 
-  tags = {
+  tags = merge(local.common_tags, {
     Environment = "monitoring"
     Purpose     = "apim-latency-monitoring"
-  }
+  })
 }
 
-### Auto Scaling Configuration
-# Auto Scale Settings for APIM (requires StandardV2 or higher SKU)
+### Auto Scaling Configuration (conditional on autoscale.enabled)
 resource "azurerm_monitor_autoscale_setting" "apim_autoscale" {
-  count               = var.enable_apim_autoscale ? 1 : 0
+  count               = var.autoscale.enabled ? 1 : 0
   name                = "apim-autoscale-${var.app_suffix}"
   resource_group_name = azurerm_resource_group.rg.name
   location            = azurerm_resource_group.rg.location
@@ -676,11 +742,11 @@ resource "azurerm_monitor_autoscale_setting" "apim_autoscale" {
 
     capacity {
       default = var.apim_sku_capacity
-      minimum = var.apim_autoscale_min_capacity
-      maximum = var.apim_autoscale_max_capacity
+      minimum = var.autoscale.min_capacity
+      maximum = var.autoscale.max_capacity
     }
 
-    # Scale out rule - increase capacity when CPU > 70%
+    # Scale out rule — increase capacity when utilization > threshold
     rule {
       metric_trigger {
         metric_name        = "Capacity"
@@ -690,7 +756,7 @@ resource "azurerm_monitor_autoscale_setting" "apim_autoscale" {
         time_window        = "PT10M"
         time_aggregation   = "Average"
         operator           = "GreaterThan"
-        threshold          = 70
+        threshold          = var.autoscale.scale_out_threshold
         metric_namespace   = "Microsoft.ApiManagement/service"
       }
 
@@ -698,11 +764,11 @@ resource "azurerm_monitor_autoscale_setting" "apim_autoscale" {
         direction = "Increase"
         type      = "ChangeCount"
         value     = "1"
-        cooldown  = "PT5M"
+        cooldown  = var.autoscale.cooldown_period
       }
     }
 
-    # Scale in rule - decrease capacity when CPU < 30%
+    # Scale in rule — decrease capacity when utilization < threshold
     rule {
       metric_trigger {
         metric_name        = "Capacity"
@@ -712,7 +778,7 @@ resource "azurerm_monitor_autoscale_setting" "apim_autoscale" {
         time_window        = "PT10M"
         time_aggregation   = "Average"
         operator           = "LessThan"
-        threshold          = 30
+        threshold          = var.autoscale.scale_in_threshold
         metric_namespace   = "Microsoft.ApiManagement/service"
       }
 
@@ -720,87 +786,30 @@ resource "azurerm_monitor_autoscale_setting" "apim_autoscale" {
         direction = "Decrease"
         type      = "ChangeCount"
         value     = "1"
-        cooldown  = "PT5M"
+        cooldown  = var.autoscale.cooldown_period
       }
-    }    # Scale out rule based on request count
-    # rule {
-    #   metric_trigger {
-    #     metric_name        = "Requests"
-    #     metric_resource_id = azapi_resource.apim.id
-    #     time_grain         = "PT1M"
-    #     statistic          = "Sum"
-    #     time_window        = "PT5M"
-    #     time_aggregation   = "Total"
-    #     operator           = "GreaterThan"
-    #     threshold          = 1000  # Scale out if > 1000 requests in 5 minutes
-    #     metric_namespace   = "Microsoft.ApiManagement/service"
-    #   }
-
-    #   scale_action {
-    #     direction = "Increase"
-    #     type      = "ChangeCount"
-    #     value     = "1"
-    #     cooldown  = "PT10M"
-    #   }
-    # }    # Scale in rule based on low request count
-    # rule {
-    #   metric_trigger {
-    #     metric_name        = "Requests"
-    #     metric_resource_id = azapi_resource.apim.id
-    #     time_grain         = "PT1M"
-    #     statistic          = "Sum"
-    #     time_window        = "PT15M"
-    #     time_aggregation   = "Total"
-    #     operator           = "LessThan"
-    #     threshold          = 100  # Scale in if < 100 requests in 15 minutes
-    #     metric_namespace   = "Microsoft.ApiManagement/service"
-    #   }
-
-    #   scale_action {
-    #     direction = "Decrease"
-    #     type      = "ChangeCount"
-    #     value     = "1"
-    #     cooldown  = "PT15M"
-    #   }
-    # }
-  }
-
-  # Notification for scaling events
-  notification {
-    email {
-      send_to_subscription_administrator    = false
-      send_to_subscription_co_administrator = false
-      custom_emails                         = ["jmasengesho@microsoft.com"]
     }
   }
 
-  tags = {
+  # Notification for scaling events (reuses monitoring alert emails if available)
+  dynamic "notification" {
+    for_each = length(var.monitoring_alerting.alert_emails) > 0 ? [1] : []
+    content {
+      email {
+        send_to_subscription_administrator    = false
+        send_to_subscription_co_administrator = false
+        custom_emails                         = var.monitoring_alerting.alert_emails
+      }
+    }
+  }
+
+  tags = merge(local.common_tags, {
     Environment = "monitoring"
     Purpose     = "apim-autoscaling"
-  }
+  })
 }
 
-### Global Security Policies
-# Apply IP whitelisting policy to the entire APIM instance using azapi_resource
-# resource "azapi_resource" "whitelist-global_policy" {
-#   type      = "Microsoft.ApiManagement/service/policies@2024-05-01"
-#   name      = "policy"
-#   parent_id = azapi_resource.apim.id
-
-#   body = {
-#     properties = {
-#       format = "xml"
-#       value  = file("global-policy.xml")
-#     }
-#   }
-
-#   lifecycle {
-#     ignore_changes = [body]
-#   }
-# }
-
-### Alternative approach using azurerm provider instead of azapi
-### (Comment out the azapi_resource block and use this instead)
+### Global Policy (IP filtering + security headers)
 resource "azurerm_api_management_policy" "global_policy" {
   api_management_id   = azapi_resource.apim.id
   xml_content         = file("global-policy.xml")

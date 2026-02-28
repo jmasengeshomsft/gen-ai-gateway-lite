@@ -1,20 +1,25 @@
 ### ──────────────────────────────────────────────
 ### APIM ❤️ AI Gateway — Chat Completion Tests
 ### ──────────────────────────────────────────────
+### Usage with VS Code REST Client extension:
+###   1. terraform output -json apim_gateway_url        → paste into @baseUrl
+###   2. terraform output -json apim_subscription_key   → paste into @subscriptionKey
+###   3. terraform output -json apim_tenant_subscription_keys → paste tenant keys
+### ──────────────────────────────────────────────
 
-@baseUrl = https://apim-tf2lab01.azure-api.net
+@baseUrl = https://apim-YOUR_SUFFIX.azure-api.net
 @apiVersion = 2024-10-21
 @deploymentId = gpt-4o
 
 # Default (lab) subscription key
-@subscriptionKey = 0bf123f90bf6405698d2810e4d600273
+@subscriptionKey = YOUR_DEFAULT_SUBSCRIPTION_KEY
 
 # ── Tenant subscription keys ────────────────────
 # Run:  terraform output -json apim_tenant_subscription_keys
 # to retrieve the actual keys after deployment.
-@contosoKey = 49f66256f4a242f6a62d59bd13a57a0b
-@fabrikamKey = 4b774d71a4784c42bdc6637463a9561d
-@adventureWorksKey = 3adcf03c19544727a8f4ccb98d5f3c37
+@contosoKey = YOUR_CONTOSO_KEY
+@fabrikamKey = YOUR_FABRIKAM_KEY
+@adventureWorksKey = YOUR_ADVENTURE_WORKS_KEY
 
 ### ──────────────────────────────────────────────
 ### 🧪 Chat Completion — default lab subscription

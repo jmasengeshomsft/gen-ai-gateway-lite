@@ -29,9 +29,31 @@
             <value>@("Bearer " + (string)context.Variables["managed-id-access-token"])</value>
         </set-header>
         <!-- ═══════════════════════════════════════════════════════════════════
-             STEP 3: Token Rate Limiting (per subscription/tenant)
+             STEP 3: Token Rate Limiting + Quota (per subscription/tenant)
+             Each tenant gets its own TPM rate limit and monthly token quota.
              ═══════════════════════════════════════════════════════════════════ -->
-        <llm-token-limit counter-key="@(context.Subscription.Id)" tokens-per-minute="10000" estimate-prompt-tokens="true" remaining-tokens-variable-name="remainingTokens" />
+        <choose>
+%{ for sub in tenant_subscriptions ~}
+            <!-- ${sub.display_name}: ${sub.tokens_per_minute} TPM / ${sub.token_quota} ${sub.token_quota_period} quota -->
+            <when condition="@(context.Subscription.Id == &quot;${sub.subscription_id}&quot;)">
+                <llm-token-limit counter-key="@(context.Subscription.Id)"
+                    tokens-per-minute="${sub.tokens_per_minute}"
+                    token-quota="${sub.token_quota}" token-quota-period="${sub.token_quota_period}"
+                    estimate-prompt-tokens="true"
+                    remaining-tokens-variable-name="remainingTokens"
+                    remaining-quota-tokens-variable-name="remainingQuotaTokens" />
+            </when>
+%{ endfor ~}
+            <otherwise>
+                <!-- Default / lab subscription -->
+                <llm-token-limit counter-key="@(context.Subscription.Id)"
+                    tokens-per-minute="${default_tokens_per_minute}"
+                    token-quota="${default_token_quota}" token-quota-period="${default_token_quota_period}"
+                    estimate-prompt-tokens="true"
+                    remaining-tokens-variable-name="remainingTokens"
+                    remaining-quota-tokens-variable-name="remainingQuotaTokens" />
+            </otherwise>
+        </choose>
         <!-- ═══════════════════════════════════════════════════════════════════
              STEP 4: Token Metrics Emitting (subscription + model dimensions)
              ═══════════════════════════════════════════════════════════════════ -->
@@ -80,7 +102,17 @@
             </otherwise>
         </choose>
         -->
-        <set-backend-service backend-id="{backend-id}" />
+        <!-- ═══════════════════════════════════════════════════════════════════
+             STEP 6: Content Safety — shield prompts & block harmful categories
+             ═══════════════════════════════════════════════════════════════════ -->
+        <llm-content-safety backend-id="${content_safety_backend_id}" shield-prompt="true">
+            <categories output-type="EightSeverityLevels">
+                <category name="Hate" threshold="4" />
+                <category name="SelfHarm" threshold="4" />
+                <category name="Violence" threshold="4" />
+            </categories>
+        </llm-content-safety>
+        <set-backend-service backend-id="${backend_id}" />
     </inbound>
     <backend>
         <retry count="2" 

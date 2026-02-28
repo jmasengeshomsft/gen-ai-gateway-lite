@@ -14,6 +14,14 @@ override.tf.json
 terraform.tfvars
 *.auto.tfvars
 
+# Rendered policy (contains live subscription GUIDs — regenerate with render-policy.sh)
+policy.xml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
 # OS
 .DS_Store
 Thumbs.db

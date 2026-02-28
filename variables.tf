@@ -4,13 +4,14 @@ variable "subscription_id" {
 }
 
 variable "app_suffix" {
+  description = "Short unique string appended to all resource names (e.g. 'abc123')"
   type        = string
-  default     = "eq9wMc4L"
 }
 
 variable "resource_group_name" {
+  description = "Base name for the resource group (app_suffix is appended)"
   type        = string
-  default     = "lab-backend-pool-load-balancing-terraform"
+  default     = "ai-gateway-lite"
 }
 
 variable "resource_group_location" {
@@ -24,24 +25,19 @@ variable "openai_backend_pool_name" {
 }
 
 variable "openai_config" {
+  description = "Map of Azure AI Services (OpenAI) backends. Each entry becomes a backend in the APIM load-balanced pool."
+  type = map(object({
+    name     = string
+    location = string
+    priority = number
+    weight   = number
+  }))
   default = {
-    openai-uks = {
-      name     = "meraki-test-001",
-      location = "eastus",
-      priority = 1,
+    openai-eus = {
+      name     = "ai-services-eastus"
+      location = "eastus"
+      priority = 1
       weight   = 100
-    },
-    openai-swc = {
-      name     = "openai2",
-      location = "swedencentral",
-      priority = 2,
-      weight   = 50
-    },
-    openai-frc = {
-      name     = "openai3",
-      location = "francecentral",
-      priority = 2,
-      weight   = 50
     }
   }
 }
@@ -76,45 +72,10 @@ variable "openai_deployments" {
   }
 }
 
-# variable "openai_deployment_name" {
-#   type        = string
-#   default     = "gpt-4o"
-# }
-
-# variable "embedding_openai_deployment_name" {
-#   type        = string
-#   default     = "embedding"
-# }
-
 variable "openai_sku" {
   type        = string
   default     = "S0"
 }
-
-# variable "openai_model_name" {
-#   type        = string
-#   default     = "gpt-4o"
-# }
-
-# variable "openai_model_name_embedding" {
-#   type        = string
-#   default     = "text-embedding-3-small"
-# }
-
-# variable "openai_model_version" {
-#   type        = string
-#   default     = "2024-08-06"
-# }
-
-# variable "openai_model_version_embedding" {
-#   type        = string
-#   default     = "1"
-# }
-
-# variable "openai_model_capacity" {
-#   type        = number
-#   default     = 8
-# }
 
 variable "openai_api_spec_url" {
   type        = string
@@ -143,23 +104,45 @@ variable "apim_sku_capacity" {
   description = "The initial capacity (scale units) of the API Management service"
 }
 
-# New variable for auto scaling configuration
-variable "enable_apim_autoscale" {
-  type        = bool
-  default     = true
-  description = "Enable auto scaling for APIM"
+# ═══════════════════════════════════════════════════════════════════════════════
+# Monitoring & Alerting Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+variable "monitoring_alerting" {
+  description = "APIM monitoring and alerting configuration. When enabled, alert_emails is required."
+  type = object({
+    enabled              = optional(bool, false)
+    alert_emails         = optional(list(string), [])    # Required when enabled=true
+    alert_severity       = optional(number, 2)           # 0=Critical, 1=Error, 2=Warning, 3=Info, 4=Verbose
+    error_4xx_threshold  = optional(number, 10)          # Alert if > N 4xx errors in 5 min
+    capacity_threshold   = optional(number, 70)          # Alert if capacity >= N%
+    latency_threshold_ms = optional(number, 4000)        # Alert if avg latency > N ms
+  })
+  default = {
+    enabled = false
+  }
+
+  validation {
+    condition     = !var.monitoring_alerting.enabled || length(var.monitoring_alerting.alert_emails) > 0
+    error_message = "alert_emails must contain at least one email address when monitoring is enabled."
+  }
 }
 
-variable "apim_autoscale_min_capacity" {
-  type        = number
-  default     = 1
-  description = "Minimum number of scale units for auto scaling"
-}
-
-variable "apim_autoscale_max_capacity" {
-  type        = number
-  default     = 10
-  description = "Maximum number of scale units for auto scaling"
+# ═══════════════════════════════════════════════════════════════════════════════
+# Auto-Scaling Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+variable "autoscale" {
+  description = "APIM auto-scaling configuration (requires StandardV2 or higher SKU)"
+  type = object({
+    enabled             = optional(bool, false)
+    min_capacity        = optional(number, 1)
+    max_capacity        = optional(number, 3)
+    scale_out_threshold = optional(number, 70)           # Scale out when capacity > N%
+    scale_in_threshold  = optional(number, 30)           # Scale in when capacity < N%
+    cooldown_period     = optional(string, "PT5M")       # Cooldown between scaling actions
+  })
+  default = {
+    enabled = false
+  }
 }
 
 variable "openai_api_version" {
@@ -195,12 +178,39 @@ variable "workspace_openai_dimension" {
 
 # ── APIM Tenant Subscriptions ─────────────────────────────────────────────────
 variable "apim_tenants" {
-  description = "Map of tenant subscriptions to create in APIM. Key = tenant slug, value = display info."
+  description = "Map of tenant subscriptions to create in APIM. Key = tenant slug, value = display info + optional quota overrides."
   type = map(object({
-    display_name = string
-    tenant_id    = string            # Customer tenant / org identifier
-    state        = optional(string, "active")  # active | suspended | cancelled
+    display_name      = string
+    tenant_id         = string                       # Customer tenant / org identifier
+    state             = optional(string, "active")   # active | suspended | cancelled
+    tokens_per_minute  = optional(number)             # Per-tenant TPM override (null = use default)
+    token_quota        = optional(number)             # Per-tenant token quota override (null = use default)
+    token_quota_period = optional(string)             # Quota reset period: Hourly|Daily|Weekly|Monthly|Yearly (null = use default)
   }))
   default = {}
+}
+
+# ── Default token limits (apply to lab subscription and any tenant without overrides) ──
+variable "default_tokens_per_minute" {
+  description = "Default tokens-per-minute rate limit for subscriptions without a per-tenant override."
+  type        = number
+  default     = 10000
+}
+
+variable "default_token_quota" {
+  description = "Default token quota for subscriptions without a per-tenant override."
+  type        = number
+  default     = 500000
+}
+
+variable "default_token_quota_period" {
+  description = "Default quota reset period: Hourly, Daily, Weekly, Monthly, or Yearly."
+  type        = string
+  default     = "Monthly"
+
+  validation {
+    condition     = contains(["Hourly", "Daily", "Weekly", "Monthly", "Yearly"], var.default_token_quota_period)
+    error_message = "Must be one of: Hourly, Daily, Weekly, Monthly, Yearly."
+  }
 }
 

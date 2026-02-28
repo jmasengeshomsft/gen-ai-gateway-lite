@@ -1,40 +1,149 @@
-# Example Terraform variables file
-# Copy this file to terraform.tfvars and update the values
+# ═══════════════════════════════════════════════════════════════════════════════
+# Gen AI Gateway Lite — Example Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+# Copy this file to terraform.tfvars and update the values for your environment.
+#   cp terraform.tfvars.example terraform.tfvars
 
-# Required: Your Azure subscription ID
-subscription_id = "your-subscription-id-here"
+# ── Azure subscription ───────────────────────────────────────────────────────
+subscription_id         = "your-subscription-id-here"
 
-# Application configuration
-app_suffix = "your-unique-suffix"
-resource_group_name = "lab-backend-pool-load-balancing-terraform"
+# ── Naming & location ────────────────────────────────────────────────────────
+app_suffix              = "your-unique-suffix"   # short string appended to all resource names (e.g. "abc123")
+resource_group_name     = "ai-gateway-lite"
 resource_group_location = "eastus"
 
-# Network configuration
-vnet_name = "vnet-ai-gateway"
-vnet_address_space = "10.0.254.0/24"
-subnet_apim_address_space = "10.0.254.0/27"
+# ── Network ──────────────────────────────────────────────────────────────────
+vnet_name                              = "vnet-ai-gateway"
+vnet_address_space                     = "10.0.254.0/24"
+subnet_apim_address_space              = "10.0.254.0/27"
 subnet_private_endpoints_address_space = "10.0.254.128/25"
 
-# OpenAI configuration
-openai_sku = "S0"
+# ── APIM ─────────────────────────────────────────────────────────────────────
+apim_resource_name     = "apim"
+apim_resource_location = "eastus"          # StandardV2 not available in all regions
+apim_sku               = "StandardV2"      # StandardV2 required for autoscaling
+apim_sku_capacity      = 1
 
-# APIM configuration
-apim_resource_name = "apim"
-apim_resource_location = "eastus"
-apim_sku = "StandardV2"
-apim_sku_capacity = 1
+# ── Monitoring & Alerting ─────────────────────────────────────────────────────
+# When enabled, creates Azure Monitor action group + metric alerts for
+# 4xx errors, capacity utilisation, and latency.
+monitoring_alerting = {
+  enabled              = true
+  alert_emails         = ["ops-team@contoso.com"]
+  alert_severity       = 2                    # 0=Critical … 4=Verbose
+  error_4xx_threshold  = 10                   # > N 4xx errors in 5 min
+  capacity_threshold   = 70                   # capacity >= N%
+  latency_threshold_ms = 4000                 # avg latency > N ms
+}
 
-# Auto scaling configuration
-enable_apim_autoscale = true
-apim_autoscale_min_capacity = 1
-apim_autoscale_max_capacity = 10
+# ── Autoscaling ──────────────────────────────────────────────────────────────
+# Requires StandardV2 or higher SKU
+autoscale = {
+  enabled             = true
+  min_capacity        = 1
+  max_capacity        = 10
+  scale_out_threshold = 70                    # scale out when capacity > N%
+  scale_in_threshold  = 30                    # scale in  when capacity < N%
+  cooldown_period     = "PT5M"                # cooldown between scaling actions
+}
 
-# OpenAI backend pool configuration
-openai_backend_pool_name = "openai-backend-pool"
+# ═══════════════════════════════════════════════════════════════════════════════
+# Azure AI Services / Foundry Resources
+# ═══════════════════════════════════════════════════════════════════════════════
+# Define one or more Azure AI Services (OpenAI) instances.
+# Each entry becomes a backend in the APIM load-balanced pool.
+# Spread across regions for resilience; use priority + weight for routing.
 
-# API versions
-openai_api_version = "2024-10-21"
+openai_config = {
+  openai-eus = {
+    name     = "ai-services-eastus"
+    location = "eastus"
+    priority = 1          # primary region
+    weight   = 100
+  }
+  openai-eus2 = {
+    name     = "ai-services-eastus2"
+    location = "eastus2"
+    priority = 2          # failover
+    weight   = 50
+  }
+  openai-swc = {
+    name     = "ai-services-swedencentral"
+    location = "swedencentral"
+    priority = 2          # failover
+    weight   = 50
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Model Deployments (deployed to EACH AI Services instance above)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Optional input_price / output_price (per 1K tokens, USD) enable
+# cost-estimation tiles in the Azure Portal dashboard.
+
+openai_deployments = {
+  gpt = {
+    deployment_name = "gpt-4o"
+    model_name      = "gpt-4o"
+    model_version   = "2024-08-06"
+    model_capacity  = 8               # in 1K TPM units (8 = 8K TPM)
+    input_price     = 0.0025          # USD per 1K tokens
+    output_price    = 0.01
+  }
+  embedding = {
+    deployment_name = "embedding"
+    model_name      = "text-embedding-3-small"
+    model_version   = "1"
+    model_capacity  = 8
+    input_price     = 0.00002
+    output_price    = 0.00002
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Multi-Tenant Configuration — THE KEY VALUE OF THIS SOLUTION
+# ═══════════════════════════════════════════════════════════════════════════════
+# Each tenant receives a dedicated APIM subscription key and individual
+# token-rate-limiting / quota enforcement via APIM policies.
+#
+# Fields:
+#   display_name       — Friendly name shown in dashboard and logs
+#   tenant_id          — Your internal identifier for the customer/team
+#   state              — "active" | "suspended" (revoke access instantly)
+#   tokens_per_minute  — TPM rate limit (null = use default_tokens_per_minute)
+#   token_quota        — Total token budget per period (null = use default)
+#   token_quota_period — Hourly | Daily | Weekly | Monthly | Yearly
+
+apim_tenants = {
+  contoso = {
+    display_name      = "Contoso"
+    tenant_id         = "contoso-corp"
+    state             = "active"
+    tokens_per_minute = 20000         # premium tier — higher TPM
+    token_quota       = 1000000       # 1M tokens / month
+    token_quota_period = "Monthly"
+  }
+  fabrikam = {
+    display_name      = "Fabrikam"
+    tenant_id         = "fabrikam-inc"
+    state             = "active"
+    tokens_per_minute = 5000          # starter tier — lower TPM
+    token_quota       = 200000        # 200K tokens / month
+    token_quota_period = "Monthly"
+  }
+  adventure-works = {
+    display_name      = "Adventure Works"
+    tenant_id         = "adventure-works"
+    state             = "active"
+    # Uses defaults: 10K TPM, 500K monthly quota
+  }
+}
+
+# ── Default token limits (apply when a tenant omits overrides) ───────────────
+default_tokens_per_minute  = 10000
+default_token_quota        = 500000
+default_token_quota_period = "Monthly"
+
+# ── API spec ─────────────────────────────────────────────────────────────────
+openai_api_version  = "2024-10-21"
 openai_api_spec_url = "https://raw.githubusercontent.com/Azure/azure-rest-api-specs/main/specification/cognitiveservices/data-plane/AzureOpenAI/inference/stable/2024-10-21/inference.json"
-
-# Workspace configuration
-workspace_openai_dimension = "openai"
