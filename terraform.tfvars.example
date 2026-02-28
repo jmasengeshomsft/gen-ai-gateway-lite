@@ -1,0 +1,40 @@
+# Example Terraform variables file
+# Copy this file to terraform.tfvars and update the values
+
+# Required: Your Azure subscription ID
+subscription_id = "your-subscription-id-here"
+
+# Application configuration
+app_suffix = "your-unique-suffix"
+resource_group_name = "lab-backend-pool-load-balancing-terraform"
+resource_group_location = "eastus"
+
+# Network configuration
+vnet_name = "vnet-ai-gateway"
+vnet_address_space = "10.0.254.0/24"
+subnet_apim_address_space = "10.0.254.0/27"
+subnet_private_endpoints_address_space = "10.0.254.128/25"
+
+# OpenAI configuration
+openai_sku = "S0"
+
+# APIM configuration
+apim_resource_name = "apim"
+apim_resource_location = "eastus"
+apim_sku = "StandardV2"
+apim_sku_capacity = 1
+
+# Auto scaling configuration
+enable_apim_autoscale = true
+apim_autoscale_min_capacity = 1
+apim_autoscale_max_capacity = 10
+
+# OpenAI backend pool configuration
+openai_backend_pool_name = "openai-backend-pool"
+
+# API versions
+openai_api_version = "2024-10-21"
+openai_api_spec_url = "https://raw.githubusercontent.com/Azure/azure-rest-api-specs/main/specification/cognitiveservices/data-plane/AzureOpenAI/inference/stable/2024-10-21/inference.json"
+
+# Workspace configuration
+workspace_openai_dimension = "openai"

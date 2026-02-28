@@ -1,0 +1,107 @@
+<!-- Multi-tenant AI Gateway Policy: Auth + Rate Limiting + Token Metrics + Routing -->
+<policies>
+    <inbound>
+        <base />
+        <!-- ═══════════════════════════════════════════════════════════════════
+             STEP 1: Extract Model Name (for routing and metrics)
+             ═══════════════════════════════════════════════════════════════════ -->
+        <!-- 1a – deployment-id from the route template -->
+        <set-variable name="deployment" value="@(context.Request.MatchedParameters.ContainsKey("deployment-id") 
+                           ? context.Request.MatchedParameters["deployment-id"] 
+                           : string.Empty)" />
+        <!-- 1b – model from the request body (JSON) -->
+        <set-variable name="reqBody" value="@(context.Request.Body?.As<JObject>(preserveContent:true) 
+                           ?? new JObject())" />
+        <set-variable name="model" value="@( ((JObject)context.Variables["reqBody"])
+                              .Property("model")?.Value?.ToString() 
+                              ?? string.Empty)" />
+        <!-- 1c – first non-empty of deployment-id or model -->
+        <set-variable name="requestedModel" value="@( !string.IsNullOrEmpty((string)context.Variables["deployment"]) 
+                           ? (string)context.Variables["deployment"]
+                           : (string)context.Variables["model"] )" />
+        <!-- ═══════════════════════════════════════════════════════════════════
+             STEP 2: Managed Identity Auth (Cognitive Services)
+             ═══════════════════════════════════════════════════════════════════ -->
+        <authentication-managed-identity resource="https://cognitiveservices.azure.com" 
+                                         output-token-variable-name="managed-id-access-token" 
+                                         ignore-error="false" />
+        <set-header name="Authorization" exists-action="override">
+            <value>@("Bearer " + (string)context.Variables["managed-id-access-token"])</value>
+        </set-header>
+        <!-- ═══════════════════════════════════════════════════════════════════
+             STEP 3: Token Rate Limiting (per subscription/tenant)
+             ═══════════════════════════════════════════════════════════════════ -->
+        <llm-token-limit counter-key="@(context.Subscription.Id)" tokens-per-minute="10000" estimate-prompt-tokens="true" remaining-tokens-variable-name="remainingTokens" />
+        <!-- ═══════════════════════════════════════════════════════════════════
+             STEP 4: Token Metrics Emitting (subscription + model dimensions)
+             ═══════════════════════════════════════════════════════════════════ -->
+        <azure-openai-emit-token-metric namespace="aigateway">
+            <dimension name="Subscription ID" value="@(context.Subscription.Id)" />
+            <dimension name="Subscription Name" value="@(context.Subscription.Name)" />
+            <dimension name="Model" value="@((string)context.Variables["requestedModel"])" />
+            <dimension name="API ID" value="@(context.Api.Id)" />
+        </azure-openai-emit-token-metric>
+        <!-- ═══════════════════════════════════════════════════════════════════
+             STEP 5: Model-Based Routing
+             Commented out — single backend pool in use; all models route to {backend-id}.
+             Uncomment and configure backend IDs when multiple backends are available.
+             ═══════════════════════════════════════════════════════════════════ -->
+        <!--
+        <choose>
+            <when condition="@( string.Equals((string)context.Variables["requestedModel"], "gpt-4.1", StringComparison.OrdinalIgnoreCase))">
+                <set-backend-service backend-id="foundry1" />
+            </when>
+            <when condition="@( string.Equals((string)context.Variables["requestedModel"], "gpt-4.1-mini", StringComparison.OrdinalIgnoreCase)
+                             || string.Equals((string)context.Variables["requestedModel"], "gpt-4.1-nano", StringComparison.OrdinalIgnoreCase))">
+                <set-backend-service backend-id="foundry2" />
+            </when>
+            <when condition="@( string.Equals((string)context.Variables["requestedModel"], "model-router", StringComparison.OrdinalIgnoreCase)
+                             || string.Equals((string)context.Variables["requestedModel"], "gpt-5", StringComparison.OrdinalIgnoreCase)
+                             || string.Equals((string)context.Variables["requestedModel"], "DeepSeek-R1", StringComparison.OrdinalIgnoreCase))">
+                <set-backend-service backend-id="foundry3" />
+            </when>
+            <when condition="@( ((string)context.Variables["requestedModel"] ?? string.Empty)
+                           .StartsWith("gpt-4o", StringComparison.OrdinalIgnoreCase))">
+                <return-response>
+                    <set-status code="403" reason="Forbidden" />
+                    <set-body>@("{\"error\":\"Model '" + (string)context.Variables["requestedModel"] + "' is not permitted.\"}")</set-body>
+                </return-response>
+            </when>
+            <otherwise>
+                <return-response>
+                    <set-status code="400" reason="Bad Request" />
+                    <set-header name="Content-Type" exists-action="override">
+                        <value>application/json</value>
+                    </set-header>
+                    <set-body>{
+              "error": "Invalid model or deployment-id. Supply a valid name in the URL or JSON body."
+            }</set-body>
+                </return-response>
+            </otherwise>
+        </choose>
+        -->
+        <set-backend-service backend-id="{backend-id}" />
+    </inbound>
+    <backend>
+        <retry count="2" 
+               interval="0" 
+               first-fast-retry="true" 
+               condition="@(context.Response.StatusCode == 429 || (context.Response.StatusCode == 503 && !context.Response.StatusReason.Contains("Backend pool") && !context.Response.StatusReason.Contains("is temporarily unavailable")))">
+            <forward-request buffer-request-body="true" />
+        </retry>
+    </backend>
+    <outbound>
+        <base />
+    </outbound>
+    <on-error>
+        <base />
+        <choose>
+            <!--Return a generic error that does not reveal backend pool details.-->
+            <when condition="@(context.Response.StatusCode == 503)">
+                <return-response>
+                    <set-status code="503" reason="Service Unavailable" />
+                </return-response>
+            </when>
+        </choose>
+    </on-error>
+</policies>

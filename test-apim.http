@@ -1,0 +1,92 @@
+### ──────────────────────────────────────────────
+### APIM ❤️ AI Gateway — Chat Completion Tests
+### ──────────────────────────────────────────────
+
+@baseUrl = https://apim-tf2lab01.azure-api.net
+@apiVersion = 2024-10-21
+@deploymentId = gpt-4o
+
+# Default (lab) subscription key
+@subscriptionKey = 0bf123f90bf6405698d2810e4d600273
+
+# ── Tenant subscription keys ────────────────────
+# Run:  terraform output -json apim_tenant_subscription_keys
+# to retrieve the actual keys after deployment.
+@contosoKey = 49f66256f4a242f6a62d59bd13a57a0b
+@fabrikamKey = 4b774d71a4784c42bdc6637463a9561d
+@adventureWorksKey = 3adcf03c19544727a8f4ccb98d5f3c37
+
+### ──────────────────────────────────────────────
+### 🧪 Chat Completion — default lab subscription
+### ──────────────────────────────────────────────
+
+POST {{baseUrl}}/openai/deployments/{{deploymentId}}/chat/completions?api-version={{apiVersion}}
+Content-Type: application/json
+api-key: {{subscriptionKey}}
+
+{
+  "messages": [
+    { "role": "system", "content": "You are a sarcastic, unhelpful assistant." },
+    { "role": "user", "content": "Can you tell me the time, please?" }
+  ]
+}
+
+### ──────────────────────────────────────────────
+### 🧪 Chat Completion — Contoso tenant
+### ──────────────────────────────────────────────
+
+POST {{baseUrl}}/openai/deployments/{{deploymentId}}/chat/completions?api-version={{apiVersion}}
+Content-Type: application/json
+api-key: {{contosoKey}}
+
+{
+  "messages": [
+    { "role": "system", "content": "You are a helpful assistant." },
+    { "role": "user", "content": "Summarize the benefits of API Management for AI workloads." }
+  ],
+  "max_tokens": 200
+}
+
+### ──────────────────────────────────────────────
+### 🧪 Chat Completion — Fabrikam tenant
+### ──────────────────────────────────────────────
+
+POST {{baseUrl}}/openai/deployments/{{deploymentId}}/chat/completions?api-version={{apiVersion}}
+Content-Type: application/json
+api-key: {{fabrikamKey}}
+
+{
+  "messages": [
+    { "role": "system", "content": "You are a concise assistant." },
+    { "role": "user", "content": "Explain load balancing in one sentence." }
+  ],
+  "max_tokens": 100,
+  "temperature": 0.7
+}
+
+### ──────────────────────────────────────────────
+### 🧪 Chat Completion — Adventure Works tenant
+### ──────────────────────────────────────────────
+
+POST {{baseUrl}}/openai/deployments/{{deploymentId}}/chat/completions?api-version={{apiVersion}}
+Content-Type: application/json
+api-key: {{adventureWorksKey}}
+
+{
+  "messages": [
+    { "role": "system", "content": "You are a friendly assistant." },
+    { "role": "user", "content": "What is Azure OpenAI?" }
+  ]
+}
+
+### ──────────────────────────────────────────────
+### 🧪 Embeddings — default lab subscription
+### ──────────────────────────────────────────────
+
+POST {{baseUrl}}/openai/deployments/embedding/embeddings?api-version={{apiVersion}}
+Content-Type: application/json
+api-key: {{subscriptionKey}}
+
+{
+  "input": "Azure API Management is a great way to manage AI endpoints."
+}
