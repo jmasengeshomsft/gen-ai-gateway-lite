@@ -131,6 +131,8 @@ An Azure Portal dashboard with 8 KQL-powered tiles is deployed automatically:
 
 > **Important:** Cost figures are **estimates** calculated from token counts and the per-model prices you configure in `openai_deployments`. They do **not** use the Azure Cost Management API or reflect actual billed amounts. Treat them as directional for chargeback / showback conversations.
 
+![alt text](image.png)
+
 ### 6. Autoscaling
 
 APIM StandardV2 auto-scales based on capacity utilization. Thresholds, capacity limits, and cooldown are fully configurable via the `autoscale` variable:
