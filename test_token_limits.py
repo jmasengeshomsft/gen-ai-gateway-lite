@@ -52,7 +52,7 @@ def load_config():
 
 
 GATEWAY, SUBSCRIPTIONS = load_config()
-ENDPOINT = f"{GATEWAY}/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21"
+ENDPOINT = f"{GATEWAY}/openai/deployments/gpt-4o-mini/chat/completions?api-version=2024-10-21"
 
 ctx = ssl.create_default_context()
 print_lock = threading.Lock()

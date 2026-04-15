@@ -28,3 +28,8 @@ output "apim_tenant_subscription_keys" {
   description = "Per-tenant APIM subscription keys"
   sensitive   = true
 }
+
+output "redis_hostname" {
+  value       = azurerm_managed_redis.apim_cache.hostname
+  description = "Managed Redis hostname (Balanced_B0) — registered as APIM external cache"
+}
