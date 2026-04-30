@@ -17,6 +17,8 @@ vnet_name                              = "vnet-ai-gateway"
 vnet_address_space                     = "10.0.254.0/24"
 subnet_apim_address_space              = "10.0.254.0/27"
 subnet_private_endpoints_address_space = "10.0.254.128/25"
+subnet_aca_address_space               = "10.0.254.32/27"  # /27 min for ACA workload-profile environment
+subnet_aca_private_address_space       = "10.0.254.64/27"  # /27 for internal-LB ACA environment (private MCP)
 
 # ── APIM ─────────────────────────────────────────────────────────────────────
 apim_resource_name     = "apim"

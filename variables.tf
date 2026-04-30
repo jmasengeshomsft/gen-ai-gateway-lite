@@ -170,6 +170,30 @@ variable "subnet_private_endpoints_address_space" {
   type        = string
 }
 
+variable "subnet_aca_address_space" {
+  description = "Address space for the Container Apps subnet (/27 minimum for workload-profile environments)"
+  type        = string
+  default     = "10.0.254.32/27"
+}
+
+variable "subnet_aca_private_address_space" {
+  description = "Address space for the private Container Apps subnet (/27 — dedicated internal-LB ACA environment)"
+  type        = string
+  default     = "10.0.254.64/27"
+}
+
+variable "subnet_apim_v1_address_space" {
+  description = "Address space for the Classic Standard v1 APIM subnet (/27 minimum, no delegation required)"
+  type        = string
+  default     = "10.0.254.96/27"
+}
+
+variable "enable_content_safety" {
+  description = "Set to true to deploy Azure Content Safety and enable the llm-content-safety APIM policy. Requires Content Safety S0 quota in the target region. Disable for subscriptions/regions without quota."
+  type        = bool
+  default     = false
+}
+
 variable "workspace_openai_dimension" {
   description = "The dimension of the OpenAI workspace"
   type        = string
@@ -212,5 +236,11 @@ variable "default_token_quota_period" {
     condition     = contains(["Hourly", "Daily", "Weekly", "Monthly", "Yearly"], var.default_token_quota_period)
     error_message = "Must be one of: Hourly, Daily, Weekly, Monthly, Yearly."
   }
+}
+
+variable "openai_local_auth_enabled" {
+  description = "Enable local (API key) authentication on the Azure OpenAI / AI Services accounts. Set to true only for dev/testing; disable in production and rely on managed identity."
+  type        = bool
+  default     = false
 }
 

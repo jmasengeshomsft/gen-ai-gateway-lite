@@ -120,7 +120,7 @@ resource "azurerm_cognitive_account" "ai-services" {
   resource_group_name                = azurerm_resource_group.rg.name
   kind                               = "AIServices"
   sku_name                           = var.openai_sku
-  local_auth_enabled                 = true
+  local_auth_enabled                 = var.openai_local_auth_enabled
   public_network_access_enabled      = true
   outbound_network_access_restricted = true
   custom_subdomain_name              = "${each.value.name}-${var.app_suffix}"
@@ -130,9 +130,12 @@ resource "azurerm_cognitive_account" "ai-services" {
     virtual_network_rules {
       subnet_id = azurerm_subnet.subnet_apim.id
     }
+    virtual_network_rules {
+      subnet_id = azurerm_subnet.subnet_apim_v1.id
+    }
   }
 
-  tags = local.common_tags
+  tags = merge(local.common_tags, { SecurityControl = "Ignore" })
 
   lifecycle {
     ignore_changes = [custom_subdomain_name]
@@ -308,6 +311,174 @@ resource "azurerm_api_management_api" "apim-api-openai" {
   }
 }
 
+# ── Responses API (v1) ────────────────────────────────────────────────────────
+# Codex CLI (wire_api = "responses") sends "Authorization: Bearer <key>" — the OpenAI SDK
+# convention — instead of "api-key: <key>" expected by Azure APIM subscription validation.
+# APIM subscription key checking runs BEFORE any policy can intercept and rewrite headers,
+# so we cannot transform the request on the fly on the existing subscription-required API.
+#
+# Solution: a dedicated API with subscription_required = false + an inbound policy that:
+#   1. Extracts and validates the Bearer token against the APIM subscription key (named value).
+#   2. Replaces Authorization with a Managed Identity token for the backend.
+#   3. Routes to the same backend pool as all other OpenAI operations.
+
+# Store the default APIM subscription key as a secret named value for Bearer validation.
+resource "azurerm_api_management_named_value" "responses_api_key" {
+  name                = "responses-api-key"
+  resource_group_name = azurerm_resource_group.rg.name
+  api_management_name = azapi_resource.apim.name
+  display_name        = "responses-api-key"
+  secret              = true
+  value               = azurerm_api_management_subscription.apim-api-subscription-openai.primary_key
+
+  depends_on = [azurerm_api_management_subscription.apim-api-subscription-openai]
+}
+
+resource "azurerm_api_management_api" "responses-api-v1" {
+  name                  = "responses-api-v1"
+  resource_group_name   = azurerm_resource_group.rg.name
+  api_management_name   = azapi_resource.apim.name
+  revision              = "1"
+  display_name          = "OpenAI Responses API v1 (Codex)"
+  description           = "Handles POST /v1/responses for Codex CLI (Authorization: Bearer auth)."
+  path                  = "openai/v1"  # More specific than 'openai' — APIM uses longest-prefix routing.
+  protocols             = ["https"]
+  service_url           = null
+  subscription_required = false   # Codex CLI sends Bearer token; validated in policy instead.
+  api_type              = "http"
+}
+
+# Explicit operations for all Responses API endpoints used by Codex CLI:
+#   POST /responses             — create (streaming, multi-turn)
+#   GET  /responses/{id}        — retrieve/poll a completed response
+#   POST /responses/{id}/cancel — cancel an in-flight response
+resource "azurerm_api_management_api_operation" "responses_post" {
+  operation_id        = "responses-create"
+  api_name            = azurerm_api_management_api.responses-api-v1.name
+  api_management_name = azurerm_api_management_api.responses-api-v1.api_management_name
+  resource_group_name = azurerm_api_management_api.responses-api-v1.resource_group_name
+  display_name        = "Create Response"
+  method              = "POST"
+  url_template        = "/responses"
+  response {
+    status_code = 200
+    description = "Success"
+  }
+}
+
+resource "azurerm_api_management_api_operation" "responses_get" {
+  operation_id        = "responses-get"
+  api_name            = azurerm_api_management_api.responses-api-v1.name
+  api_management_name = azurerm_api_management_api.responses-api-v1.api_management_name
+  resource_group_name = azurerm_api_management_api.responses-api-v1.resource_group_name
+  display_name        = "Get Response"
+  method              = "GET"
+  url_template        = "/responses/{id}"
+  template_parameter {
+    name     = "id"
+    required = true
+    type     = "string"
+  }
+  response {
+    status_code = 200
+    description = "Success"
+  }
+}
+
+resource "azurerm_api_management_api_operation" "responses_cancel" {
+  operation_id        = "responses-cancel"
+  api_name            = azurerm_api_management_api.responses-api-v1.name
+  api_management_name = azurerm_api_management_api.responses-api-v1.api_management_name
+  resource_group_name = azurerm_api_management_api.responses-api-v1.resource_group_name
+  display_name        = "Cancel Response"
+  method              = "POST"
+  url_template        = "/responses/{id}/cancel"
+  template_parameter {
+    name     = "id"
+    required = true
+    type     = "string"
+  }
+  response {
+    status_code = 200
+    description = "Success"
+  }
+}
+
+resource "azurerm_api_management_api_policy" "responses-api-v1-policy" {
+  api_name            = azurerm_api_management_api.responses-api-v1.name
+  api_management_name = azurerm_api_management_api.responses-api-v1.api_management_name
+  resource_group_name = azurerm_api_management_api.responses-api-v1.resource_group_name
+
+  xml_content = <<-XML
+    <policies>
+      <inbound>
+        <base />
+        <!-- Step 1: Extract and validate Bearer token sent by Codex CLI -->
+        <set-variable name="bearerKey" value="@{
+          var auth = context.Request.Headers.GetValueOrDefault("Authorization", "");
+          return auth.StartsWith("Bearer ") ? auth.Substring(7).Trim() : auth.Trim();
+        }" />
+        <choose>
+          <when condition="@(string.IsNullOrEmpty((string)context.Variables["bearerKey"]) ||
+                             (string)context.Variables["bearerKey"] != "{{responses-api-key}}")">
+            <return-response>
+              <set-status code="401" reason="Unauthorized" />
+              <set-header name="Content-Type" exists-action="override">
+                <value>application/json</value>
+              </set-header>
+              <set-body>{"statusCode":401,"message":"Invalid or missing API key."}</set-body>
+            </return-response>
+          </when>
+        </choose>
+        <!-- Step 2: Swap Authorization header for Managed Identity token (backend auth) -->
+        <authentication-managed-identity resource="https://cognitiveservices.azure.com"
+                                         output-token-variable-name="mi-token"
+                                         ignore-error="false" />
+        <set-header name="Authorization" exists-action="override">
+          <value>@("Bearer " + (string)context.Variables["mi-token"])</value>
+        </set-header>
+        <!-- Step 3: Route to the shared OpenAI backend pool -->
+        <set-backend-service backend-id="${azapi_resource.apim-backend-pool-openai.name}" />
+        <!-- Step 4: Reconstruct the backend path from matched template params.
+             API prefix 'openai/v1' is stripped by APIM; we restore /v1/... for the backend.
+             Handles: /v1/responses  |  /v1/responses/{id}  |  /v1/responses/{id}/cancel -->
+        <set-variable name="backendPath" value="@{
+          var path = "/v1/responses";
+          if (context.Request.MatchedParameters.ContainsKey("id")) {
+            path += "/" + context.Request.MatchedParameters["id"];
+            if (context.Request.Url.Path.EndsWith("/cancel")) {
+              path += "/cancel";
+            }
+          }
+          return path;
+        }" />
+        <rewrite-uri template="@((string)context.Variables["backendPath"])" copy-unmatched-params="false" />
+      </inbound>
+      <backend>
+        <!-- buffer-response="false" enables SSE/streaming required by Codex CLI.
+             Retry is intentionally omitted — retrying a mid-stream response is not possible. -->
+        <forward-request buffer-response="false" />
+      </backend>
+      <outbound>
+        <base />
+      </outbound>
+      <on-error>
+        <base />
+      </on-error>
+    </policies>
+  XML
+
+  depends_on = [azurerm_api_management_named_value.responses_api_key]
+}
+
+# Associate the Responses API with the same product so existing subscriptions cover it.
+resource "azurerm_api_management_product_api" "responses_product_api" {
+  product_id          = azurerm_api_management_product.openai_product.product_id
+  api_management_name = azapi_resource.apim.name
+  resource_group_name = azurerm_resource_group.rg.name
+  api_name            = azurerm_api_management_api.responses-api-v1.name
+}
+
 
 resource "azurerm_api_management_product" "openai_product" {
   product_id           = "openai-product"
@@ -331,6 +502,7 @@ resource "azurerm_api_management_product_api" "openai_product_api" {
 
 ### Azure Content Safety — enables llm-content-safety APIM policy
 resource "azurerm_cognitive_account" "content_safety" {
+  count                 = var.enable_content_safety ? 1 : 0
   name                  = "contentsafety-${var.app_suffix}"
   location              = azurerm_resource_group.rg.location
   resource_group_name   = azurerm_resource_group.rg.name
@@ -345,6 +517,9 @@ resource "azurerm_cognitive_account" "content_safety" {
     virtual_network_rules {
       subnet_id = azurerm_subnet.subnet_apim.id
     }
+    virtual_network_rules {
+      subnet_id = azurerm_subnet.subnet_apim_v1.id
+    }
   }
 
   tags = local.common_tags
@@ -352,18 +527,20 @@ resource "azurerm_cognitive_account" "content_safety" {
 
 # Grant APIM managed identity "Cognitive Services User" on the Content Safety resource
 resource "azurerm_role_assignment" "content_safety_user" {
-  scope                = azurerm_cognitive_account.content_safety.id
+  count                = var.enable_content_safety ? 1 : 0
+  scope                = azurerm_cognitive_account.content_safety[0].id
   role_definition_name = "Cognitive Services User"
   principal_id         = azapi_resource.apim.identity.0.principal_id
 }
 
 # APIM backend for Content Safety (used by llm-content-safety policy)
 resource "azurerm_api_management_backend" "content_safety_backend" {
+  count               = var.enable_content_safety ? 1 : 0
   name                = "content-safety-backend"
   resource_group_name = azurerm_resource_group.rg.name
   api_management_name = azapi_resource.apim.name
   protocol            = "http"
-  url                 = "${azurerm_cognitive_account.content_safety.endpoint}"
+  url                 = azurerm_cognitive_account.content_safety[0].endpoint
 }
 
 resource "azurerm_api_management_backend" "apim-backend-openai" {
@@ -440,7 +617,8 @@ resource "azurerm_api_management_api_policy" "apim-openai-policy-openai" {
 
   xml_content = templatefile("${path.module}/policy.xml.tftpl", {
     backend_id                 = azapi_resource.apim-backend-pool-openai.name
-    content_safety_backend_id  = azurerm_api_management_backend.content_safety_backend.name
+    content_safety_backend_id  = var.enable_content_safety ? azurerm_api_management_backend.content_safety_backend[0].name : ""
+    enable_content_safety      = var.enable_content_safety
     tenant_subscriptions        = local.tenant_subscriptions
     default_tokens_per_minute   = var.default_tokens_per_minute
     default_token_quota         = var.default_token_quota
@@ -492,21 +670,16 @@ resource "azurerm_application_insights" "apim_ai_logger" {
 }
 
 // 2. Create an APIM logger that points at the AppInsights instance
-resource "azapi_resource" "apim_logger" {
-  type      = "Microsoft.ApiManagement/service/loggers@2021-12-01-preview"
-  parent_id = azapi_resource.apim.id
-  name      = "appinsights"
+resource "azurerm_api_management_logger" "apim_logger" {
+  name                = "appinsights"
+  api_management_name = azapi_resource.apim.name
+  resource_group_name = azurerm_resource_group.rg.name
+  resource_id         = azurerm_application_insights.apim_ai_logger.id
+  description         = "Logger for OpenAI APIs"
+  buffered            = false
 
-  body = {
-    properties = {
-      loggerType  = "applicationInsights"
-      description = "Logger for OpenAI APIs"
-      isBuffered  = false
-      credentials = {
-        instrumentationKey = azurerm_application_insights.apim_ai_logger.instrumentation_key
-      }
-      resourceId = azurerm_application_insights.apim_ai_logger.id
-    }
+  application_insights {
+    instrumentation_key = azurerm_application_insights.apim_ai_logger.instrumentation_key
   }
 }
 
@@ -521,7 +694,7 @@ resource "azapi_resource" "apim_api_diagnostic" {
       alwaysLog               = "allErrors"
       httpCorrelationProtocol = "W3C"
       logClientIp             = true
-      loggerId                = azapi_resource.apim_logger.id
+      loggerId                = azurerm_api_management_logger.apim_logger.id
       metrics                 = true
       verbosity               = "verbose"
       sampling = {
