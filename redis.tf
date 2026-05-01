@@ -26,13 +26,24 @@ resource "azurerm_managed_redis" "apim_cache" {
   tags = local.common_tags
 }
 
-# Register Managed Redis as APIM's external cache.
-# Once configured, llm-token-limit, quota-by-key, and rate-limit-by-key
-# policies automatically write their counters here — no policy changes needed.
+# Register Managed Redis as the external cache for both APIM instances.
+# Used by the custom Redis quota counter (cache-lookup-value / cache-store-value)
+# to share a single globally-consistent token counter across all processes and replicas.
+# NOTE: llm-token-limit does NOT use this cache — its counters are always per-process.
 resource "azurerm_api_management_redis_cache" "apim_external_cache" {
   name              = "external-cache"
   api_management_id = azapi_resource.apim.id
   connection_string = "${azurerm_managed_redis.apim_cache.hostname}:${azurerm_managed_redis.apim_cache.default_database[0].port},password=${azurerm_managed_redis.apim_cache.default_database[0].primary_access_key},ssl=True,abortConnect=False"
   redis_cache_id    = azurerm_managed_redis.apim_cache.id
-  description       = "Shared counter store for token quota and rate-limit policies across all APIM scale units"
+  description       = "Shared Redis quota counter store — used by cache-store-value/cache-lookup-value across all v2 replicas"
+}
+
+# Same Redis instance registered on the Classic v1 APIM so both APIMsss share
+# quota counter keys for any subscription IDs they have in common.
+resource "azurerm_api_management_redis_cache" "apim_v1_external_cache" {
+  name              = "external-cache"
+  api_management_id = azurerm_api_management.apim_v1.id
+  connection_string = "${azurerm_managed_redis.apim_cache.hostname}:${azurerm_managed_redis.apim_cache.default_database[0].port},password=${azurerm_managed_redis.apim_cache.default_database[0].primary_access_key},ssl=True,abortConnect=False"
+  redis_cache_id    = azurerm_managed_redis.apim_cache.id
+  description       = "Shared Redis quota counter store — used by cache-store-value/cache-lookup-value across all v1 IIS worker processes"
 }

@@ -260,6 +260,8 @@ locals {
       tokens_per_minute  = coalesce(v.tokens_per_minute, var.default_tokens_per_minute)
       token_quota        = coalesce(v.token_quota, var.default_token_quota)
       token_quota_period = coalesce(v.token_quota_period, var.default_token_quota_period)
+      quota_date_fmt     = local.quota_period_config[coalesce(v.token_quota_period, var.default_token_quota_period)].date_fmt
+      quota_ttl_seconds  = local.quota_period_config[coalesce(v.token_quota_period, var.default_token_quota_period)].ttl_seconds
     }
   ]
 }
@@ -269,6 +271,9 @@ resource "azurerm_api_management_api_policy" "apim_v1_openai_policy" {
   api_management_name = azurerm_api_management_api.apim_v1_api_openai.api_management_name
   resource_group_name = azurerm_resource_group.rg.name
 
+  # Ensure the external Redis cache is registered before the policy that uses it
+  depends_on = [azurerm_api_management_redis_cache.apim_v1_external_cache]
+
   xml_content = templatefile("${path.module}/policy.xml.tftpl", {
     backend_id                 = azapi_resource.apim_v1_backend_pool.name
     content_safety_backend_id  = ""
@@ -277,6 +282,8 @@ resource "azurerm_api_management_api_policy" "apim_v1_openai_policy" {
     default_tokens_per_minute  = var.default_tokens_per_minute
     default_token_quota        = var.default_token_quota
     default_token_quota_period = var.default_token_quota_period
+    default_quota_date_fmt     = local.quota_period_config[var.default_token_quota_period].date_fmt
+    default_quota_ttl_seconds  = local.quota_period_config[var.default_token_quota_period].ttl_seconds
   })
 }
 

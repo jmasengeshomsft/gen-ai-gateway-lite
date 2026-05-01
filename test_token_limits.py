@@ -22,14 +22,27 @@ Usage examples
 
 Counter behaviour under test
 -----------------------------
-  v2 (StandardV2): ACA scales to multiple gateway replicas, each carrying an
-    independent in-memory llm-token-limit counter.  Round-robin routing means
-    successive requests see different remaining-quota values → counter is NOT
-    globally consistent.
+  Both v1 and v2 exhibit the same fundamental behaviour as documented by
+  Microsoft (https://learn.microsoft.com/en-us/azure/api-management/llm-token-limit-policy):
 
-  v1 (Classic Developer_1): single dedicated VM, single process — only one
-    counter exists.  Remaining-quota decrements monotonically and Run 2 of the
-    proof lands on the same value Run 1 left off at → counter IS consistent.
+    "This policy tracks token usage independently at each gateway where it is
+     applied... It doesn't aggregate token counts across the entire instance."
+
+  In other words, llm-token-limit counters are per-process by design and do NOT
+  use the APIM external Redis cache (which only applies to rate-limit / quota /
+  cache-lookup-value policies).
+
+  v2 (StandardV2): ACA scales to multiple gateway replicas.  Each replica has its
+    own independent llm-token-limit counter.  Without a shared store, round-robin
+    routing causes diverging quota values.
+
+  v1 (Classic Developer_1): single VM but multiple IIS worker processes (typically
+    2-3).  Each worker process has its own independent llm-token-limit counter.
+
+  Fix (implemented): quota enforcement is handled by a custom Redis counter using
+  cache-lookup-value / cache-store-value with caching-type="external".  All processes
+  and replicas read from and write to the same Redis key, so the quota counter is
+  globally consistent.  llm-token-limit is retained for TPM rate limiting only.
 """
 import urllib.request
 import json
@@ -270,11 +283,11 @@ def phase3(gateway, subscriptions, label, burst_target):
 #          was restarted or a new replica took over with a fresh counter.
 # Run 2 : one tiny request.  Check that remaining quota ≈ Run 1's end value.
 #
-# Expected results
-# ----------------
-#   v1 (Classic, single VM) : same process, same counter → PASS (delta < 500)
-#   v2 (StandardV2, ACA)    : round-robin may land on a replica whose counter
-#                             started fresh → FAIL (delta >> 500)
+# Expected results (Redis-backed custom counter)
+# ------------------------------------------------
+#   Both v1 and v2 : Redis key shared across all processes/replicas.
+#                    Run 2 reads the same counter Run 1 left off at.
+#                    Delta = only the one tiny Run 2 request → PASS (delta < 500)
 
 WAIT_SECONDS = 70   # just over one TPM window; keeps ACA warm (< 8 min idle)
 

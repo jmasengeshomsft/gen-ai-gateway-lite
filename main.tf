@@ -44,6 +44,16 @@ locals {
   ))
   subscription_names_datatable = "let subscriptionNames = datatable(SubscriptionId: string, SubscriptionName: string)[\r\n${local.subscription_names_rows}\r\n];\r\n"
 
+  # Maps token_quota_period → C# DateTime format + Redis key TTL in seconds.
+  # Used by the custom Redis quota counter in policy.xml.tftpl.
+  quota_period_config = {
+    "Hourly"  = { date_fmt = "yyyyMMddHH", ttl_seconds = 3600     }
+    "Daily"   = { date_fmt = "yyyyMMdd",   ttl_seconds = 86400    }
+    "Weekly"  = { date_fmt = "yyyyMMdd",   ttl_seconds = 604800   }  # approx: 7-day rolling window
+    "Monthly" = { date_fmt = "yyyyMM",     ttl_seconds = 2678400  }  # 31 days
+    "Yearly"  = { date_fmt = "yyyy",       ttl_seconds = 31622400 }  # 366 days
+  }
+
   # Build per-tenant subscription objects for the policy template
   tenant_subscriptions = [
     for k, v in var.apim_tenants : {
@@ -52,6 +62,8 @@ locals {
       tokens_per_minute  = coalesce(v.tokens_per_minute, var.default_tokens_per_minute)
       token_quota        = coalesce(v.token_quota, var.default_token_quota)
       token_quota_period = coalesce(v.token_quota_period, var.default_token_quota_period)
+      quota_date_fmt     = local.quota_period_config[coalesce(v.token_quota_period, var.default_token_quota_period)].date_fmt
+      quota_ttl_seconds  = local.quota_period_config[coalesce(v.token_quota_period, var.default_token_quota_period)].ttl_seconds
     }
   ]
 }
@@ -615,14 +627,19 @@ resource "azurerm_api_management_api_policy" "apim-openai-policy-openai" {
   api_management_name = azurerm_api_management_api.apim-api-openai.api_management_name
   resource_group_name = azurerm_api_management_api.apim-api-openai.resource_group_name
 
+  # Ensure the external Redis cache is registered before the policy that uses it
+  depends_on = [azurerm_api_management_redis_cache.apim_external_cache]
+
   xml_content = templatefile("${path.module}/policy.xml.tftpl", {
-    backend_id                 = azapi_resource.apim-backend-pool-openai.name
-    content_safety_backend_id  = var.enable_content_safety ? azurerm_api_management_backend.content_safety_backend[0].name : ""
-    enable_content_safety      = var.enable_content_safety
-    tenant_subscriptions        = local.tenant_subscriptions
-    default_tokens_per_minute   = var.default_tokens_per_minute
-    default_token_quota         = var.default_token_quota
-    default_token_quota_period  = var.default_token_quota_period
+    backend_id                  = azapi_resource.apim-backend-pool-openai.name
+    content_safety_backend_id   = var.enable_content_safety ? azurerm_api_management_backend.content_safety_backend[0].name : ""
+    enable_content_safety       = var.enable_content_safety
+    tenant_subscriptions         = local.tenant_subscriptions
+    default_tokens_per_minute    = var.default_tokens_per_minute
+    default_token_quota          = var.default_token_quota
+    default_token_quota_period   = var.default_token_quota_period
+    default_quota_date_fmt       = local.quota_period_config[var.default_token_quota_period].date_fmt
+    default_quota_ttl_seconds    = local.quota_period_config[var.default_token_quota_period].ttl_seconds
   })
 }
 
