@@ -31,7 +31,7 @@ resource "azurerm_managed_redis" "apim_cache" {
 # to share a single globally-consistent token counter across all processes and replicas.
 # NOTE: llm-token-limit does NOT use this cache — its counters are always per-process.
 resource "azurerm_api_management_redis_cache" "apim_external_cache" {
-  name              = "external-cache"
+  name              = "default"
   api_management_id = azapi_resource.apim.id
   connection_string = "${azurerm_managed_redis.apim_cache.hostname}:${azurerm_managed_redis.apim_cache.default_database[0].port},password=${azurerm_managed_redis.apim_cache.default_database[0].primary_access_key},ssl=True,abortConnect=False"
   redis_cache_id    = azurerm_managed_redis.apim_cache.id
@@ -41,7 +41,7 @@ resource "azurerm_api_management_redis_cache" "apim_external_cache" {
 # Same Redis instance registered on the Classic v1 APIM so both APIMsss share
 # quota counter keys for any subscription IDs they have in common.
 resource "azurerm_api_management_redis_cache" "apim_v1_external_cache" {
-  name              = "external-cache"
+  name              = "default"
   api_management_id = azurerm_api_management.apim_v1.id
   connection_string = "${azurerm_managed_redis.apim_cache.hostname}:${azurerm_managed_redis.apim_cache.default_database[0].port},password=${azurerm_managed_redis.apim_cache.default_database[0].primary_access_key},ssl=True,abortConnect=False"
   redis_cache_id    = azurerm_managed_redis.apim_cache.id
