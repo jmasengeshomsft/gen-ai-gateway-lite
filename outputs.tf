@@ -55,3 +55,15 @@ output "apim_v1_tenant_subscription_keys" {
   description = "Per-tenant APIM v1 subscription keys"
   sensitive   = true
 }
+
+output "tenant_config" {
+  value = {
+    for k, v in var.apim_tenants : k => {
+      display_name       = v.display_name
+      tokens_per_minute  = coalesce(v.tokens_per_minute, var.default_tokens_per_minute)
+      token_quota        = coalesce(v.token_quota, var.default_token_quota)
+      token_quota_period = coalesce(v.token_quota_period, var.default_token_quota_period)
+    }
+  }
+  description = "Per-tenant quota configuration (for test tooling — quota, period, TPM)"
+}
