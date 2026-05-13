@@ -403,7 +403,6 @@ This solution uses APIM `llm-token-limit` with Redis-backed counters for tenant 
            caching-type="external" />
 ```
 
-![alt text](image-1.png)
 
 #### How everything is related
 
