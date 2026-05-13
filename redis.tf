@@ -37,13 +37,3 @@ resource "azurerm_api_management_redis_cache" "apim_external_cache" {
   redis_cache_id    = azurerm_managed_redis.apim_cache.id
   description       = "Shared Redis quota counter store — used by cache-store-value/cache-lookup-value across all v2 replicas"
 }
-
-# Same Redis instance registered on the Classic v1 APIM so both APIMsss share
-# quota counter keys for any subscription IDs they have in common.
-resource "azurerm_api_management_redis_cache" "apim_v1_external_cache" {
-  name              = "default"
-  api_management_id = azurerm_api_management.apim_v1.id
-  connection_string = "${azurerm_managed_redis.apim_cache.hostname}:${azurerm_managed_redis.apim_cache.default_database[0].port},password=${azurerm_managed_redis.apim_cache.default_database[0].primary_access_key},ssl=True,abortConnect=False"
-  redis_cache_id    = azurerm_managed_redis.apim_cache.id
-  description       = "Shared Redis quota counter store — used by cache-store-value/cache-lookup-value across all v1 IIS worker processes"
-}

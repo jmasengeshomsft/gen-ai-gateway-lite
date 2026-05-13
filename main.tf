@@ -142,9 +142,6 @@ resource "azurerm_cognitive_account" "ai-services" {
     virtual_network_rules {
       subnet_id = azurerm_subnet.subnet_apim.id
     }
-    virtual_network_rules {
-      subnet_id = azurerm_subnet.subnet_apim_v1.id
-    }
   }
 
   tags = merge(local.common_tags, { SecurityControl = "Ignore" })
@@ -528,9 +525,6 @@ resource "azurerm_cognitive_account" "content_safety" {
     default_action = "Deny"
     virtual_network_rules {
       subnet_id = azurerm_subnet.subnet_apim.id
-    }
-    virtual_network_rules {
-      subnet_id = azurerm_subnet.subnet_apim_v1.id
     }
   }
 

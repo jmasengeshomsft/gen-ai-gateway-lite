@@ -34,28 +34,6 @@ output "redis_hostname" {
   description = "Managed Redis hostname (Balanced_B0) — registered as APIM external cache"
 }
 
-output "apim_v1_gateway_url" {
-  value       = azurerm_api_management.apim_v1.gateway_url
-  description = "API Management v1 (Classic Standard) Gateway URL — for quota counter comparison vs StandardV2"
-}
-
-output "apim_v1_subscription_key" {
-  value       = azurerm_api_management_subscription.apim_v1_default.primary_key
-  description = "API Management v1 subscription key (default lab)"
-  sensitive   = true
-}
-
-output "apim_v1_tenant_subscription_keys" {
-  value = {
-    for k, sub in azurerm_api_management_subscription.apim_v1_tenant : k => {
-      display_name = sub.display_name
-      primary_key  = sub.primary_key
-    }
-  }
-  description = "Per-tenant APIM v1 subscription keys"
-  sensitive   = true
-}
-
 output "tenant_config" {
   value = {
     for k, v in var.apim_tenants : k => {

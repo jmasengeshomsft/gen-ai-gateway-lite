@@ -182,12 +182,6 @@ variable "subnet_aca_private_address_space" {
   default     = "10.0.254.64/27"
 }
 
-variable "subnet_apim_v1_address_space" {
-  description = "Address space for the Classic Standard v1 APIM subnet (/27 minimum, no delegation required)"
-  type        = string
-  default     = "10.0.254.96/27"
-}
-
 variable "enable_content_safety" {
   description = "Set to true to deploy Azure Content Safety and enable the llm-content-safety APIM policy. Requires Content Safety S0 quota in the target region. Disable for subscriptions/regions without quota."
   type        = bool

@@ -1,8 +1,7 @@
 <policies>
     <inbound>
         <ip-filter action="allow">
-            <!-- Replace with your public IP or CIDR range -->
-            <address>YOUR_IP_ADDRESS</address>
+            <address>73.208.224.112</address>
         </ip-filter>
     </inbound>
     <backend>
