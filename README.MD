@@ -358,8 +358,112 @@ python test_token_limits.py --burst fabrikam
 The script runs 3 phases:
 
 1. **Connectivity** — sends a chat completion with each tenant's key
-2. **Burst** — fires 10 concurrent requests to test rate limiting (expect HTTP 429)
+2. **Burst** — fires 10 concurrent requests to test rate limiting/quota enforcement (expect HTTP 403 or 429 once limits are enforced)
 3. **Isolation** — confirms other tenants are unaffected by the burst
+
+> **Note on concurrent burst tests:** with parallel requests, some in-flight calls may still return `200` after crossing quota, then subsequent calls are blocked (`403/429`). This is expected for distributed counter enforcement under concurrency.
+
+### Redis Cache Quota Policy Behavior
+
+This solution uses APIM `llm-token-limit` with Redis-backed counters for tenant quota tracking.
+
+#### Cache policy section (from `policy.xml.tftpl`)
+
+```xml
+<!-- Inbound: read shared quota counter and block if already exhausted -->
+<cache-lookup-value key="@((string)context.Variables[&quot;tenantQuotaKey&quot;])"
+          variable-name="quotaConsumed"
+          caching-type="external"
+          default-value="0" />
+<choose>
+  <when condition="@(Convert.ToInt64((string)context.Variables[&quot;quotaConsumed&quot;]) >= (long)context.Variables[&quot;tenantQuotaLimit&quot;])">
+    <return-response>
+      <set-status code="403" reason="Forbidden" />
+      <set-header name="Retry-After" exists-action="override">
+        <value>@(Convert.ToString((int)context.Variables[&quot;quotaTtlSeconds&quot;]))</value>
+      </set-header>
+    </return-response>
+  </when>
+</choose>
+
+<!-- Outbound: add actual usage.total_tokens and persist with period TTL -->
+<cache-lookup-value key="@((string)context.Variables[&quot;tenantQuotaKey&quot;])"
+          variable-name="quotaConsumedCurrent"
+          caching-type="external"
+          default-value="0" />
+<set-variable name="tokensThisRequest"
+        value="@(context.Response.StatusCode == 200
+          ? ((long?)((context.Response.Body?.As&lt;JObject&gt;(preserveContent: true))?[&quot;usage&quot;]?[&quot;total_tokens&quot;]) ?? 0L)
+          : 0L)" />
+<set-variable name="newQuotaConsumed"
+        value="@(Convert.ToInt64((string)context.Variables[&quot;quotaConsumedCurrent&quot;]) + (long)context.Variables[&quot;tokensThisRequest&quot;])" />
+<cache-store-value key="@((string)context.Variables[&quot;tenantQuotaKey&quot;])"
+           value="@(((long)context.Variables[&quot;newQuotaConsumed&quot;]).ToString())"
+           duration="@((int)context.Variables[&quot;quotaTtlSeconds&quot;])"
+           caching-type="external" />
+```
+
+#### How everything is related
+
+1. **Tenant config in Terraform** sets `token_quota`, `token_quota_period`, and TPM for each subscription.
+2. **Inbound policy builds quota key** (`tenantQuotaKey`) and period TTL (`quotaTtlSeconds`) from that config.
+3. **Inbound cache lookup** reads current Redis quota usage (`quotaConsumed`) for that tenant-period key.
+4. **Quota guard** returns `403` when consumed tokens already meet/exceed `tenantQuotaLimit`.
+5. **`llm-token-limit` applies TPM control** (minute-level token budget) on the same request path.
+6. **Outbound policy reads actual model usage** from `usage.total_tokens` in the response body.
+7. **Outbound cache store writes new cumulative value** (`newQuotaConsumed`) back to Redis with period TTL.
+8. **Headers expose current state** (`x-remaining-quota-tokens`, `x-quota-limit`, `x-quota-period`) for test scripts and diagnostics.
+
+Because the inbound check and outbound write are separate steps, concurrent in-flight requests can all pass step 4 before step 7 updates are visible, which is why temporary overspill can appear during bursts.
+
+#### Counter model
+
+- **Counter key:** per subscription/tenant (for example, `..._quota:<subscription-guid>`)
+- **Stored value:** cumulative tokens consumed in the active quota window
+- **TTL:** remaining duration of the quota window (for `Hourly`, key expires at the hour boundary; for `Daily/Monthly`, at that period boundary)
+
+#### Enforcement under concurrency
+
+Quota enforcement is strict for newly processed requests, but not perfectly atomic across many simultaneous in-flight requests.
+
+- During a burst, multiple requests can pass validation before the shared counter reflects all increments.
+- This can create temporary overspill beyond configured quota.
+- Once counter updates catch up, the next request is blocked (`403` or `429`, depending on policy path).
+
+#### Spillover estimator
+
+For one burst window:
+
+$$
+spillover = \max(0,\ (accepted\_requests \times avg\_tokens\_per\_request) - quota\_remaining\_at\_burst\_start)
+$$
+
+Example (Fabrikam burst):
+
+- Quota cap: `5000/hour`
+- Quota remaining at burst start: `4951`
+- Accepted burst requests: `10`
+- Average tokens per request: `843`
+
+$$
+(10 \times 843) - 4951 = 3479
+$$
+
+Estimated overspill: **3,479 tokens**.
+
+#### Customer reporting approach
+
+To provide a robust estimate for customers:
+
+1. Run the burst test 20-30 times under the same workload profile.
+2. Report P50 spillover (typical), P95 spillover (planning value), and maximum observed spillover.
+3. Use P95 as the recommended expected overspill for capacity/risk conversations.
+
+#### If stricter enforcement is required
+
+- Reduce caller parallelism to lower in-flight overshoot.
+- Implement atomic quota operations in Redis (single-step check+increment semantics).
+- Tune TPM/quota against realistic per-request token sizes and burst shape.
 
 ### Render Policy Locally
 
