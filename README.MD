@@ -431,41 +431,6 @@ Quota enforcement is strict for newly processed requests, but not perfectly atom
 - This can create temporary overspill beyond configured quota.
 - Once counter updates catch up, the next request is blocked (`403` or `429`, depending on policy path).
 
-#### Spillover estimator
-
-For one burst window:
-
-$$
-spillover = \max(0,\ (accepted\_requests \times avg\_tokens\_per\_request) - quota\_remaining\_at\_burst\_start)
-$$
-
-Example (Fabrikam burst):
-
-- Quota cap: `5000/hour`
-- Quota remaining at burst start: `4951`
-- Accepted burst requests: `10`
-- Average tokens per request: `843`
-
-$$
-(10 \times 843) - 4951 = 3479
-$$
-
-Estimated overspill: **3,479 tokens**.
-
-#### Customer reporting approach
-
-To provide a robust estimate for customers:
-
-1. Run the burst test 20-30 times under the same workload profile.
-2. Report P50 spillover (typical), P95 spillover (planning value), and maximum observed spillover.
-3. Use P95 as the recommended expected overspill for capacity/risk conversations.
-
-#### If stricter enforcement is required
-
-- Reduce caller parallelism to lower in-flight overshoot.
-- Implement atomic quota operations in Redis (single-step check+increment semantics).
-- Tune TPM/quota against realistic per-request token sizes and burst shape.
-
 ### Render Policy Locally
 
 To inspect the fully-rendered APIM policy XML with your live subscription GUIDs:
