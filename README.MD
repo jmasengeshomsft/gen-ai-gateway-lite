@@ -403,6 +403,8 @@ This solution uses APIM `llm-token-limit` with Redis-backed counters for tenant 
            caching-type="external" />
 ```
 
+![alt text](image-1.png)
+
 #### How everything is related
 
 1. **Tenant config in Terraform** sets `token_quota`, `token_quota_period`, and TPM for each subscription.
