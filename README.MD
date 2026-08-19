@@ -102,6 +102,14 @@ apim_tenants = {
 
 When a tenant exceeds their limit, they receive HTTP 429 — other tenants are unaffected.
 
+### Native Streaming and Quota Enforcement
+
+The native APIM `llm-token-limit` policy can enforce tenant TPM and period quotas while preserving OpenAI Server-Sent Events (SSE). The policy uses `buffer-response="false"`, so response chunks are forwarded immediately instead of being buffered for response-body parsing.
+
+For streaming requests, `x-remaining-quota-tokens` is an APIM estimate rather than an exact post-stream balance. Use HTTP `403` as the quota-exhaustion signal and `ApiManagementGatewayLlmLog` for exact final prompt, completion, and total token usage.
+
+See [NATIVE_APIM_STREAMING_QUOTA_TESTS.md](NATIVE_APIM_STREAMING_QUOTA_TESTS.md) for the validated test matrix and commands.
+
 ### 2. Multi-Region Load Balancing with Circuit Breakers
 
 Requests are distributed across AI Services instances using a **priority + weight** backend pool. If a backend returns 429 or 503, the circuit breaker trips for 1 minute and traffic fails over to other regions — with automatic retry respecting `Retry-After` headers.
