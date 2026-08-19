@@ -30,7 +30,7 @@ output "apim_tenant_subscription_keys" {
 }
 
 output "redis_hostname" {
-  value       = azurerm_managed_redis.apim_cache.hostname
+  value       = try(azurerm_managed_redis.apim_cache[0].hostname, null)
   description = "Managed Redis hostname (Balanced_B0) — registered as APIM external cache"
 }
 

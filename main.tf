@@ -621,9 +621,6 @@ resource "azurerm_api_management_api_policy" "apim-openai-policy-openai" {
   api_management_name = azurerm_api_management_api.apim-api-openai.api_management_name
   resource_group_name = azurerm_api_management_api.apim-api-openai.resource_group_name
 
-  # Ensure the external Redis cache is registered before the policy that uses it
-  depends_on = [azurerm_api_management_redis_cache.apim_external_cache]
-
   xml_content = templatefile("${path.module}/policy.xml.tftpl", {
     backend_id                  = azapi_resource.apim-backend-pool-openai.name
     content_safety_backend_id   = var.enable_content_safety ? azurerm_api_management_backend.content_safety_backend[0].name : ""

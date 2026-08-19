@@ -8,6 +8,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "azurerm_managed_redis" "apim_cache" {
+  count                     = var.enable_external_redis_cache ? 1 : 0
   name                      = "redis-${var.app_suffix}"
   location                  = azurerm_resource_group.rg.location
   resource_group_name       = azurerm_resource_group.rg.name
@@ -31,9 +32,10 @@ resource "azurerm_managed_redis" "apim_cache" {
 # to share a single globally-consistent token counter across all processes and replicas.
 # NOTE: llm-token-limit does NOT use this cache — its counters are always per-process.
 resource "azurerm_api_management_redis_cache" "apim_external_cache" {
+  count             = var.enable_external_redis_cache ? 1 : 0
   name              = "default"
   api_management_id = azapi_resource.apim.id
-  connection_string = "${azurerm_managed_redis.apim_cache.hostname}:${azurerm_managed_redis.apim_cache.default_database[0].port},password=${azurerm_managed_redis.apim_cache.default_database[0].primary_access_key},ssl=True,abortConnect=False"
-  redis_cache_id    = azurerm_managed_redis.apim_cache.id
+  connection_string = "${azurerm_managed_redis.apim_cache[0].hostname}:${azurerm_managed_redis.apim_cache[0].default_database[0].port},password=${azurerm_managed_redis.apim_cache[0].default_database[0].primary_access_key},ssl=True,abortConnect=False"
+  redis_cache_id    = azurerm_managed_redis.apim_cache[0].id
   description       = "Shared Redis quota counter store — used by cache-store-value/cache-lookup-value across all v2 replicas"
 }

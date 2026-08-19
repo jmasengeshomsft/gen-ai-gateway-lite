@@ -188,6 +188,12 @@ variable "enable_content_safety" {
   default     = false
 }
 
+variable "enable_external_redis_cache" {
+  description = "Create Managed Redis and register it as APIM's external cache. Native llm-token-limit quota enforcement does not require this cache."
+  type        = bool
+  default     = false
+}
+
 variable "workspace_openai_dimension" {
   description = "The dimension of the OpenAI workspace"
   type        = string
