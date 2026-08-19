@@ -1,8 +1,5 @@
 <policies>
     <inbound>
-        <ip-filter action="allow">
-            <address>73.208.224.112</address>
-        </ip-filter>
     </inbound>
     <backend>
     </backend>
