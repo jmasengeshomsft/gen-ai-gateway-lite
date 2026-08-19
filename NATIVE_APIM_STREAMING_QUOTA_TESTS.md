@@ -1,6 +1,6 @@
 # Native APIM streaming and token quota validation
 
-This branch uses APIM's native `llm-token-limit` policy for per-tenant TPM and token-period quota enforcement. It does not use the optional Redis cache for quota enforcement.
+This branch uses APIM's native `llm-token-limit` policy for per-tenant TPM and token-period quota enforcement. Redis-backed quota work is excluded from this focused branch so streaming and native APIM enforcement can be evaluated independently.
 
 ## What changed
 
@@ -90,34 +90,34 @@ The outbound section only exposes diagnostic headers from variables that the nat
 
 ## Rendered APIM policy example
 
-In the freshly deployed `tf34lab09n1` APIM instance, the template renders concrete subscription IDs and tenant limits. Example excerpt:
+The deployed template renders concrete subscription IDs and tenant limits. Subscription IDs are represented below with placeholders so this example can be shared safely:
 
 ```xml
 <!-- STEP 3: Native TPM + quota enforcement -->
 <choose>
 	<!-- Adventure Works: 10000 TPM | 3000000 Monthly quota -->
-	<when condition="@(context.Subscription.Id == &quot;e959a226-fb3f-4d15-9c2d-a9112727773f&quot;)">
+	<when condition="@(context.Subscription.Id == &quot;&lt;adventure-works-subscription-id&gt;&quot;)">
 		<set-variable name="tenantQuotaLimit" value="@(3000000L)" />
 		<set-variable name="tpmCap" value="@(10000)" />
 		<set-variable name="quotaPeriodLabel" value="Monthly" />
 	</when>
 
 	<!-- Contoso Corp: 1000 TPM | 500000 Monthly quota -->
-	<when condition="@(context.Subscription.Id == &quot;4f6198ba-f1b6-4b3f-89a7-ee0e1cc2ede6&quot;)">
+	<when condition="@(context.Subscription.Id == &quot;&lt;contoso-subscription-id&gt;&quot;)">
 		<set-variable name="tenantQuotaLimit" value="@(500000L)" />
 		<set-variable name="tpmCap" value="@(1000)" />
 		<set-variable name="quotaPeriodLabel" value="Monthly" />
 	</when>
 
 	<!-- Fabrikam Inc: 2000 TPM | 5000 Hourly quota -->
-	<when condition="@(context.Subscription.Id == &quot;7555d3ad-9fdf-4208-b32b-2a1e4b8179de&quot;)">
+	<when condition="@(context.Subscription.Id == &quot;&lt;fabrikam-subscription-id&gt;&quot;)">
 		<set-variable name="tenantQuotaLimit" value="@(5000L)" />
 		<set-variable name="tpmCap" value="@(2000)" />
 		<set-variable name="quotaPeriodLabel" value="Hourly" />
 	</when>
 
 	<!-- Floor Works: 5000 TPM | 1500000 Monthly quota -->
-	<when condition="@(context.Subscription.Id == &quot;f2b6c265-64c5-45a3-afed-32c8aac65624&quot;)">
+	<when condition="@(context.Subscription.Id == &quot;&lt;floor-works-subscription-id&gt;&quot;)">
 		<set-variable name="tenantQuotaLimit" value="@(1500000L)" />
 		<set-variable name="tpmCap" value="@(5000)" />
 		<set-variable name="quotaPeriodLabel" value="Monthly" />
@@ -153,10 +153,6 @@ Rendered streaming forwarding and diagnostic headers:
 </set-header>
 ```
 
-## Why Redis is isolated in this branch
-
-Redis remains in the codebase as optional infrastructure, but `enable_external_redis_cache = false` prevents it from being created for this native policy path. The native `llm-token-limit` policy does not use APIM's external cache as its counter store. External Redis is still a valid architecture for a centralized quota service, but not through APIM `cache-lookup-value` and `cache-store-value` in an unbuffered SSE response path.
-
 ## Test matrix
 
 | Test | Command | Expected proof |
@@ -168,7 +164,7 @@ Redis remains in the codebase as optional infrastructure, but `enable_external_r
 
 ## Latest clean-deployment test results
 
-After destroying the previous `tf34lab09r1` environment, the branch was redeployed as `tf34lab09n1` with Redis disabled. The low-impact streaming test passed:
+After a clean redeployment, the low-impact streaming test passed:
 
 ```text
 SSE smoke: HTTP 200 | chunks=10 | usage=21 | TPM header=2000 | quota header=5000
