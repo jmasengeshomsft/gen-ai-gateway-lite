@@ -2,12 +2,160 @@
 
 This branch uses APIM's native `llm-token-limit` policy for per-tenant TPM and token-period quota enforcement. It does not use the optional Redis cache for quota enforcement.
 
+## What changed
+
+The original policy used a custom quota counter implemented with APIM cache policies:
+
+```xml
+<cache-lookup-value key="@((string)context.Variables[&quot;tenantQuotaKey&quot;])"
+					variable-name="quotaConsumed"
+					caching-type="external"
+					default-value="0" />
+
+<!-- reject if quotaConsumed >= tenantQuotaLimit -->
+
+<cache-lookup-value key="@((string)context.Variables[&quot;tenantQuotaKey&quot;])"
+					variable-name="quotaConsumedCurrent"
+					caching-type="external"
+					default-value="0" />
+<set-variable name="tokensThisRequest"
+			  value="@(context.Response.StatusCode == 200
+				  ? ((long?)((context.Response.Body?.As&lt;JObject&gt;(preserveContent: true))?[&quot;usage&quot;]?[&quot;total_tokens&quot;]) ?? 0L)
+				  : 0L)" />
+<cache-store-value key="@((string)context.Variables[&quot;tenantQuotaKey&quot;])"
+				   value="@(((long)context.Variables[&quot;newQuotaConsumed&quot;]).ToString())"
+				   duration="@((int)context.Variables[&quot;quotaTtlSeconds&quot;])"
+				   caching-type="external" />
+```
+
+That design worked for normal JSON responses, but it conflicted with Server-Sent Events (SSE). Streaming responses are a sequence of `data:` chunks, not one JSON object, so reading `context.Response.Body.As<JObject>()` in outbound either buffers/breaks streaming or cannot observe final streamed usage at the right time.
+
+The native policy removes the custom cache counter from the request path and lets APIM's `llm-token-limit` enforce both TPM and quota. Exact final token accounting for streaming is handled by `ApiManagementGatewayLlmLog`, not by response-body parsing.
+
 ## Policy model
 
 - `llm-token-limit` enforces `tokens-per-minute` and `token-quota` per APIM subscription.
 - `buffer-response="false"` forwards server-sent event (SSE) chunks immediately.
 - `ApiManagementGatewayLlmLog` records the exact token usage after a streamed request completes when `stream_options.include_usage=true`.
 - `x-remaining-quota-tokens` is a native APIM estimate. It is useful for diagnostics but is not the pass/fail source for quota enforcement tests.
+
+## Terraform policy template
+
+The template resolves tenant-specific limits first, then applies one native `llm-token-limit` policy instance.
+
+```xml
+<!-- STEP 3: Native TPM + quota enforcement -->
+<choose>
+%{ for sub in tenant_subscriptions ~}
+	<!-- ${sub.display_name}: ${sub.tokens_per_minute} TPM | ${sub.token_quota} ${sub.token_quota_period} quota -->
+	<when condition="@(context.Subscription.Id == &quot;${sub.subscription_id}&quot;)">
+		<set-variable name="tenantQuotaLimit" value="@(${sub.token_quota}L)" />
+		<set-variable name="tpmCap"           value="@(${sub.tokens_per_minute})" />
+		<set-variable name="quotaPeriodLabel" value="${sub.token_quota_period}" />
+	</when>
+%{ endfor ~}
+	<otherwise>
+		<set-variable name="tenantQuotaLimit" value="@(${default_token_quota}L)" />
+		<set-variable name="tpmCap"           value="@(${default_tokens_per_minute})" />
+		<set-variable name="quotaPeriodLabel" value="${default_token_quota_period}" />
+	</otherwise>
+</choose>
+
+<llm-token-limit counter-key="@(context.Subscription.Id)"
+	tokens-per-minute="@((int)context.Variables[&quot;tpmCap&quot;])"
+	token-quota="@((long)context.Variables[&quot;tenantQuotaLimit&quot;])"
+	token-quota-period="@((string)context.Variables[&quot;quotaPeriodLabel&quot;])"
+	estimate-prompt-tokens="true"
+	remaining-tokens-variable-name="remainingTokens"
+	remaining-quota-tokens-variable-name="remainingQuotaTokens"
+	tokens-consumed-variable-name="tokensConsumed" />
+```
+
+The backend section explicitly disables response buffering so streamed chunks are returned to the caller immediately:
+
+```xml
+<forward-request buffer-request-body="true" buffer-response="false" />
+```
+
+The outbound section only exposes diagnostic headers from variables that the native policy populated. It does not parse or recalculate the response body.
+
+```xml
+<set-header name="x-remaining-tpm-tokens" exists-action="override">
+	<value>@(context.Variables.ContainsKey("remainingTokens") ? Convert.ToString(context.Variables["remainingTokens"]) : "n/a")</value>
+</set-header>
+<set-header name="x-remaining-quota-tokens" exists-action="override">
+	<value>@(context.Variables.ContainsKey("remainingQuotaTokens") ? Convert.ToString(context.Variables["remainingQuotaTokens"]) : "n/a")</value>
+</set-header>
+```
+
+## Rendered APIM policy example
+
+In the freshly deployed `tf34lab09n1` APIM instance, the template renders concrete subscription IDs and tenant limits. Example excerpt:
+
+```xml
+<!-- STEP 3: Native TPM + quota enforcement -->
+<choose>
+	<!-- Adventure Works: 10000 TPM | 3000000 Monthly quota -->
+	<when condition="@(context.Subscription.Id == &quot;e959a226-fb3f-4d15-9c2d-a9112727773f&quot;)">
+		<set-variable name="tenantQuotaLimit" value="@(3000000L)" />
+		<set-variable name="tpmCap" value="@(10000)" />
+		<set-variable name="quotaPeriodLabel" value="Monthly" />
+	</when>
+
+	<!-- Contoso Corp: 1000 TPM | 500000 Monthly quota -->
+	<when condition="@(context.Subscription.Id == &quot;4f6198ba-f1b6-4b3f-89a7-ee0e1cc2ede6&quot;)">
+		<set-variable name="tenantQuotaLimit" value="@(500000L)" />
+		<set-variable name="tpmCap" value="@(1000)" />
+		<set-variable name="quotaPeriodLabel" value="Monthly" />
+	</when>
+
+	<!-- Fabrikam Inc: 2000 TPM | 5000 Hourly quota -->
+	<when condition="@(context.Subscription.Id == &quot;7555d3ad-9fdf-4208-b32b-2a1e4b8179de&quot;)">
+		<set-variable name="tenantQuotaLimit" value="@(5000L)" />
+		<set-variable name="tpmCap" value="@(2000)" />
+		<set-variable name="quotaPeriodLabel" value="Hourly" />
+	</when>
+
+	<!-- Floor Works: 5000 TPM | 1500000 Monthly quota -->
+	<when condition="@(context.Subscription.Id == &quot;f2b6c265-64c5-45a3-afed-32c8aac65624&quot;)">
+		<set-variable name="tenantQuotaLimit" value="@(1500000L)" />
+		<set-variable name="tpmCap" value="@(5000)" />
+		<set-variable name="quotaPeriodLabel" value="Monthly" />
+	</when>
+
+	<otherwise>
+		<set-variable name="tenantQuotaLimit" value="@(5000000L)" />
+		<set-variable name="tpmCap" value="@(10000)" />
+		<set-variable name="quotaPeriodLabel" value="Monthly" />
+	</otherwise>
+</choose>
+
+<llm-token-limit counter-key="@(context.Subscription.Id)"
+	tokens-per-minute="@((int)context.Variables[&quot;tpmCap&quot;])"
+	token-quota="@((long)context.Variables[&quot;tenantQuotaLimit&quot;])"
+	token-quota-period="@((string)context.Variables[&quot;quotaPeriodLabel&quot;])"
+	estimate-prompt-tokens="true"
+	remaining-tokens-variable-name="remainingTokens"
+	remaining-quota-tokens-variable-name="remainingQuotaTokens"
+	tokens-consumed-variable-name="tokensConsumed" />
+```
+
+Rendered streaming forwarding and diagnostic headers:
+
+```xml
+<forward-request buffer-request-body="true" buffer-response="false" />
+
+<set-header name="x-remaining-tpm-tokens" exists-action="override">
+	<value>@(context.Variables.ContainsKey("remainingTokens") ? Convert.ToString(context.Variables["remainingTokens"]) : "n/a")</value>
+</set-header>
+<set-header name="x-remaining-quota-tokens" exists-action="override">
+	<value>@(context.Variables.ContainsKey("remainingQuotaTokens") ? Convert.ToString(context.Variables["remainingQuotaTokens"]) : "n/a")</value>
+</set-header>
+```
+
+## Why Redis is isolated in this branch
+
+Redis remains in the codebase as optional infrastructure, but `enable_external_redis_cache = false` prevents it from being created for this native policy path. The native `llm-token-limit` policy does not use APIM's external cache as its counter store. External Redis is still a valid architecture for a centralized quota service, but not through APIM `cache-lookup-value` and `cache-store-value` in an unbuffered SSE response path.
 
 ## Test matrix
 
@@ -17,6 +165,17 @@ This branch uses APIM's native `llm-token-limit` policy for per-tenant TPM and t
 | SSE contract | `python test_streaming_quota_enforcement.py` | SSE chunks, content, `[DONE]`, and final stream usage are returned. |
 | Streaming quota persistence | `python test_streaming_quota_enforcement.py --enforce --tenant fabrikam` | Fabrikam reaches a native hourly quota `403` and remains blocked after a TPM window passes. This consumes the hourly Fabrikam allowance. |
 | Block stability and isolation | `python test_quota_block_stability.py --probes 4 --interval 25` | A quota-blocked Fabrikam remains blocked over the observation period while Contoso remains available. Run immediately after the enforcement test. |
+
+## Latest clean-deployment test results
+
+After destroying the previous `tf34lab09r1` environment, the branch was redeployed as `tf34lab09n1` with Redis disabled. The low-impact streaming test passed:
+
+```text
+SSE smoke: HTTP 200 | chunks=10 | usage=21 | TPM header=2000 | quota header=5000
+PASS: unbuffered SSE and terminal usage are available.
+```
+
+The broader test run showed the native policy can exhaust and re-block Fabrikam, but the `x-remaining-quota-tokens` header can move in non-monotonic ways and a strict repeated-block test observed one intermittent HTTP 200 before subsequent probes returned HTTP 403 again. Treat enforcement status (`403` quota, `429` TPM) and `ApiManagementGatewayLlmLog` as the reliable evidence, not the estimated remaining-quota header.
 
 ## Interpretation
 
