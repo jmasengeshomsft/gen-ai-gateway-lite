@@ -29,73 +29,40 @@
             <value>@("Bearer " + (string)context.Variables["managed-id-access-token"])</value>
         </set-header>
         <!-- ═══════════════════════════════════════════════════════════════════
-             STEP 3: TPM Rate Limit (llm-token-limit) + Redis Quota Counter
+             STEP 3: Native TPM + quota enforcement
 
-             TPM  : enforced by llm-token-limit — per-process in-memory, resets
-                    every minute.  Fast path, no external round-trip.
-
-             Quota: enforced by Redis cache-lookup-value / cache-store-value.
-                    Key = "quota:{subscriptionId}:{periodBucket}"
-                    e.g. "quota:abc123:202504" for Monthly quota in Apr 2025.
-                    All processes and replicas share the same Redis key, so the
-                    counter is globally consistent across IIS workers (v1) and
-                    ACA replicas (v2).  TTL = length of the quota period.
-
-             Step 3 is split into two phases:
-               3A — Resolve tenant config (key, limit, TTL, TPM cap, period label).
-               3B — Shared enforcement block (lookup, reject if exhausted, TPM limit).
+             APIM's llm-token-limit policy enforces both the per-minute token
+             budget and the tenant quota window. This keeps streaming responses
+             unbuffered while APIM handles token counting internally.
              ═══════════════════════════════════════════════════════════════════ -->
 
         <!-- ─── 3A: Resolve per-tenant quota configuration ────────────────── -->
         <choose>
 %{ for sub in tenant_subscriptions ~}
-            <!-- ${sub.display_name}: ${sub.tokens_per_minute} TPM | ${sub.token_quota} ${sub.token_quota_period} quota (Redis-backed) -->
+            <!-- ${sub.display_name}: ${sub.tokens_per_minute} TPM | ${sub.token_quota} ${sub.token_quota_period} quota -->
             <when condition="@(context.Subscription.Id == &quot;${sub.subscription_id}&quot;)">
-                <set-variable name="tenantQuotaKey"
-                              value="@(&quot;quota:${sub.subscription_id}:&quot; + DateTime.UtcNow.ToString(&quot;${sub.quota_date_fmt}&quot;))" />
                 <set-variable name="tenantQuotaLimit" value="@(${sub.token_quota}L)" />
-                <set-variable name="quotaTtlSeconds"  value="@(${sub.quota_ttl_seconds})" />
                 <set-variable name="tpmCap"           value="@(${sub.tokens_per_minute})" />
                 <set-variable name="quotaPeriodLabel" value="${sub.token_quota_period}" />
             </when>
 %{ endfor ~}
             <otherwise>
                 <!-- Default / lab subscription -->
-                <set-variable name="tenantQuotaKey"
-                              value="@(&quot;quota:&quot; + context.Subscription.Id + &quot;:&quot; + DateTime.UtcNow.ToString(&quot;${default_quota_date_fmt}&quot;))" />
                 <set-variable name="tenantQuotaLimit" value="@(${default_token_quota}L)" />
-                <set-variable name="quotaTtlSeconds"  value="@(${default_quota_ttl_seconds})" />
                 <set-variable name="tpmCap"           value="@(${default_tokens_per_minute})" />
                 <set-variable name="quotaPeriodLabel" value="${default_token_quota_period}" />
             </otherwise>
         </choose>
 
-        <!-- ─── 3B: Shared enforcement (lookup, reject, TPM limit) ────────── -->
-        <cache-lookup-value key="@((string)context.Variables[&quot;tenantQuotaKey&quot;])"
-                            variable-name="quotaConsumed"
-                            caching-type="external"
-                            default-value="0" />
-        <choose>
-            <when condition="@(Convert.ToInt64((string)context.Variables[&quot;quotaConsumed&quot;]) >= (long)context.Variables[&quot;tenantQuotaLimit&quot;])">
-                <return-response>
-                    <set-status code="403" reason="Forbidden" />
-                    <set-header name="Content-Type" exists-action="override">
-                        <value>application/json</value>
-                    </set-header>
-                    <!-- Standards-compliant retry hint (period TTL is a safe upper bound). -->
-                    <set-header name="Retry-After" exists-action="override">
-                        <value>@(Convert.ToString((int)context.Variables[&quot;quotaTtlSeconds&quot;]))</value>
-                    </set-header>
-                    <set-body>@("{\"error\":{\"code\":\"TokenQuotaExceeded\",\"message\":\"Token quota of " + ((long)context.Variables["tenantQuotaLimit"]).ToString() + " per " + (string)context.Variables["quotaPeriodLabel"] + " exceeded for subscription '" + context.Subscription.Name + "'.\"}}")</set-body>
-                </return-response>
-            </when>
-        </choose>
+        <!-- ─── 3B: Native token rate + quota enforcement ────────────────── -->
         <llm-token-limit counter-key="@(context.Subscription.Id)"
             tokens-per-minute="@((int)context.Variables[&quot;tpmCap&quot;])"
+            token-quota="@((long)context.Variables[&quot;tenantQuotaLimit&quot;])"
+            token-quota-period="@((string)context.Variables[&quot;quotaPeriodLabel&quot;])"
             estimate-prompt-tokens="true"
-            remaining-tokens-variable-name="remainingTokens" />
-        <set-variable name="remainingQuotaTokens"
-                      value="@(Math.Max(0L, (long)context.Variables[&quot;tenantQuotaLimit&quot;] - Convert.ToInt64((string)context.Variables[&quot;quotaConsumed&quot;])))" />
+            remaining-tokens-variable-name="remainingTokens"
+            remaining-quota-tokens-variable-name="remainingQuotaTokens"
+            tokens-consumed-variable-name="tokensConsumed" />
         <!-- ═══════════════════════════════════════════════════════════════════
              STEP 4: Token Metrics Emitting (subscription + model dimensions)
              ═══════════════════════════════════════════════════════════════════ -->
@@ -123,42 +90,15 @@
         <retry count="2" 
                interval="0" 
                first-fast-retry="true" 
-               condition="@(context.Response.StatusCode == 429 || (context.Response.StatusCode == 503 && !context.Response.StatusReason.Contains("Backend pool") && !context.Response.StatusReason.Contains("is temporarily unavailable")))">
-            <forward-request buffer-request-body="true" />
+                    condition="@(context.Response.StatusCode == 429 || (context.Response.StatusCode == 503 && !context.Response.StatusReason.Contains("Backend pool") && !context.Response.StatusReason.Contains("is temporarily unavailable")))">
+                <!-- Do not buffer SSE responses; llm-token-limit tracks streamed usage. -->
+                <forward-request buffer-request-body="true" buffer-response="false" />
         </retry>
     </backend>
     <outbound>
         <base />
-        <!-- ─── Redis quota counter update ──────────────────────────────────
-             Re-read the current counter (another process/replica may have
-             incremented it since our inbound check), add this request's
-             actual token count (read from usage.total_tokens in the LLM
-             response), then write back with the period TTL.
-             Read-modify-write is not atomic, but for quota-period-level
-             enforcement (not millisecond concurrency) it is accurate enough.
-             Streaming responses without `stream_options.include_usage=true`
-             will report 0 tokens — handled gracefully via the (long?) cast.
-             ──────────────────────────────────────────────────────────────── -->
-        <choose>
-            <when condition="@(context.Variables.ContainsKey(&quot;tenantQuotaKey&quot;))">
-                <cache-lookup-value key="@((string)context.Variables[&quot;tenantQuotaKey&quot;])"
-                                    variable-name="quotaConsumedCurrent"
-                                    caching-type="external"
-                                    default-value="0" />
-                <set-variable name="tokensThisRequest"
-                              value="@(context.Response.StatusCode == 200
-                                  ? ((long?)((context.Response.Body?.As&lt;JObject&gt;(preserveContent: true))?[&quot;usage&quot;]?[&quot;total_tokens&quot;]) ?? 0L)
-                                  : 0L)" />
-                <set-variable name="newQuotaConsumed"
-                              value="@(Convert.ToInt64((string)context.Variables[&quot;quotaConsumedCurrent&quot;]) + (long)context.Variables[&quot;tokensThisRequest&quot;])" />
-                <cache-store-value key="@((string)context.Variables[&quot;tenantQuotaKey&quot;])"
-                                   value="@(((long)context.Variables[&quot;newQuotaConsumed&quot;]).ToString())"
-                                   duration="@((int)context.Variables[&quot;quotaTtlSeconds&quot;])"
-                                   caching-type="external" />
-                <set-variable name="remainingQuotaTokens"
-                              value="@(Math.Max(0L, (long)context.Variables[&quot;tenantQuotaLimit&quot;] - (long)context.Variables[&quot;newQuotaConsumed&quot;]))" />
-            </when>
-        </choose>
+        <!-- Native llm-token-limit populates remainingTokens, remainingQuotaTokens,
+             and tokensConsumed without parsing or buffering the response body. -->
         <set-header name="x-remaining-tpm-tokens" exists-action="override">
             <value>@(context.Variables.ContainsKey("remainingTokens") ? Convert.ToString(context.Variables["remainingTokens"]) : "n/a")</value>
         </set-header>
